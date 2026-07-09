@@ -1,0 +1,20 @@
+# .NET / Tizen build output
+bin/
+obj/
+out/
+artifacts/
+*.tpk
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+
+# Secrets / local env
+.env
+*.local.json
+
+# OS cruft
+.DS_Store
+Thumbs.db
