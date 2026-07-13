@@ -1,51 +1,73 @@
 # AGENTS.md — goal-flow-device-agent-tizen (coding-session guide)
 
-Context for an AI/coding session in this repo. Read first — especially the warning.
+Context for an AI/coding session in this repo. Read first.
 
-## ⚠️ Status: FROZEN, PRE-v2 SNAPSHOT — do not mistake for current
+## Status: RE-PORTED TO v2 (2026-07-13) — Tizen edge of the current device brain
 
-This is the Tizen port of the GoalFlow device agent, but it is **frozen at an early
-(pre-v2-SK-rewrite) architecture generation** (2 commits, never resynced). The
-current source of truth for the device brain is
-**`../goal-flow-device-agent-ubuntu`**, which has since moved to a completely
-different internal shape. Do NOT treat this repo's classes as current.
+This is the **Tizen Family Hub** deployment of the GoalFlow device agent. As of
+2026-07-13 it has been **re-ported to the v2 Semantic-Kernel design** and is in
+sync with the source of truth, **`../goal-flow-device-agent-ubuntu`**. (It was
+previously frozen at the retired v1 harness/pipeline architecture.)
 
-Concretely, this repo still has the OLD v1 layout — `Harnesses/RulesPlanner.cs`,
-`ScriptedPlanner.cs`, `LlmPlanner.cs`, `ApprovalBroker.cs`, `EffectExecutor.cs`,
-`ChangeWatcher.cs`, `CapabilityManager.cs`, `Pipeline.cs`, `WorldState.cs` — **none
-of which exist in the ubuntu repo anymore**. The ubuntu repo now uses
-`Agent/GoalAgent.cs` + `Modules/Capabilities/*Plugin.cs` (SK plugins) +
-`Modules/Steering/*` (`SafetyFilter`, `ApprovalCoordinator`, `MonitorAdapt`), is
-**LLM-only** (no `GOALFLOW_PLANNER=rules|scripted|llm` — that model was removed), and
-never hardcodes a clock date (this repo's docs/`CODE_GUIDE.md` mention a hardcoded
-`VirtualClock anchor` — that violates the v2 "generic clock" invariant).
+The port is deliberately thin: the **portable v2 core is byte-for-byte identical**
+to the Ubuntu build, and only the platform edges differ. Future re-syncs are a
+plain copy of the core + a `dotnet build`.
 
-## What this repo is (intended role)
+## Layout
 
-The eventual **Tizen Family Hub** deployment of the device agent. The plan: port the
-`.NET 8 + Semantic Kernel` core from `goal-flow-device-agent-ubuntu` unchanged, and
-swap only the platform edges — `ServiceApplication` host (`Program.cs`), a
-`PipelineFactory` selected by `GOALFLOW_ADAPTERS=mock|tizen`, `TizenApis.cs` adapter
-stubs, `tizen-manifest.xml`, and `GoalFlow.Device.Tizen.csproj` (net8.0 + Tizen.NET +
-Semantic Kernel). The Ubuntu build stays as the demo fallback (one-line endpoint swap).
+- **Portable core (copied unchanged from ubuntu `src/GoalFlow.Device/`):**
+  - `Agent/GoalAgent.cs` — the SK agent: builds the kernel, auto function-calling
+    planner, approval/adaptation. `AgentSettings` + `BuildKernel` live here.
+  - `Contracts/*.cs` — v2 wire contracts (Dispatch, PlanReady, Proposal, Status,
+    Approval, Control, AgentEvent, Capabilities, Hello, ContractJson).
+  - `Modules/Capabilities/*Plugin.cs` — SK capability plugins (`KernelFunction`s):
+    Inventory, Calendar, Recipe, ShoppingList, Reminder, Guests, ApplianceControl,
+    FamilyProfiles, Budget, Notify + `MockWorldStore` (concrete world over `data/*.json`).
+  - `Modules/Steering/*` — `SafetyFilter` (IFunctionInvocationFilter), `ApprovalCoordinator`,
+    `Grounding`, `MonitorAdapt` (+ `MaterialityPolicy`), `Clock` (`IClock`/`SimulatedClock`),
+    `CapabilityRegistry`, `Trace`.
+  - `Transport/WsClient.cs` — thin WS transport (connect-retry + reconnect-on-drop,
+    `FrameReceived` event, serialized `SendAsync`).
+- **Tizen platform edge (the ONLY device-specific code):**
+  - `Program.cs` — `GoalFlowService : ServiceApplication`. `OnCreate` builds the host
+    and starts the connect/receive loop on a background task (OnCreate must return);
+    `OnTerminate` cancels + disposes.
+  - `DeviceHost.cs` — the DI container + kernel builder. Mirrors the Ubuntu `Program.cs`
+    wiring exactly so the core runs unchanged. Env: `OPENROUTER_*`, `WS_URL`,
+    `GOALFLOW_DATA_DIR`, `GOALFLOW_DATE`, `LOG_LEVEL`.
+  - `GoalFlow.Device.Tizen.csproj` — net8.0 + Tizen.NET 12.x + Semantic Kernel +
+    Microsoft.Extensions.{Logging,Console,DI}. Keep the package list in sync with the
+    Ubuntu csproj.
+  - `tizen-manifest.xml` — `service-application` (headless), internet + alarm +
+    notification + mediastorage privileges (reserved for real actuators).
 
-## Stack & build
+## v2 invariants (do NOT regress)
 
-- .NET 8 + Tizen.NET 12.x + Semantic Kernel. The Tizen SDK is NOT in this dev
-  environment; the on-`.tpk`/on-Hub build is done manually by the human.
-- Spike verified previously: `dotnet restore` + `dotnet build` succeed together.
-  `GOALFLOW_ADAPTERS=mock` runs the portable core against mock adapters.
+- **LLM-ONLY.** Planning goes through the SK kernel + OpenRouter. There is NO
+  `GOALFLOW_PLANNER=rules|scripted|llm` — that model was removed in v2.
+- **Generic clock.** `SimulatedClock` anchored at real today (or `$GOALFLOW_DATE`);
+  `set_date` / `advance_day` controls drive it. No hardcoded anchor date anywhere.
+- **The v1 adapter seam is gone.** There is no `IInventoryApi` / `GOALFLOW_ADAPTERS=mock|tizen`.
+  The world is the concrete `MockWorldStore` reading bundled `data/*.json` (works on the
+  Hub — it's just JSON). **Wiring real Tizen actuators is future work behind the capability
+  plugins** — change what a plugin *does* (e.g. `NotifyPlugin`/`ReminderPlugin`/
+  `ApplianceControlPlugin` → real Tizen.Applications APIs), not a separate adapter set.
+  The manifest already reserves the privileges.
 
-## If you are asked to work here
+## Build & run
 
-The main outstanding task is **(b) re-port from the current ubuntu `Agent/`/`Modules/`
-tree** — bring this repo up to the v2 SK design, then re-swap the Tizen edges. Until
-then, keep changes minimal and read `../goal-flow-device-agent-ubuntu/AGENTS.md` +
-`docs/HARNESSES.md` for the real architecture.
+- **Builds in this dev env**: `dotnet build -c Debug` succeeds (Tizen.NET ships the
+  `ServiceApplication` types as a NuGet package — no Tizen workload needed). 0 errors;
+  the one warning is a benign Tizen.NUI Xaml-target notice.
+- **Running the service** needs the Tizen runtime (the Family Hub or an emulator) — the
+  `.tpk` build + on-Hub deploy/run is done manually by the human; the Tizen SDK is not in
+  this dev environment. The **Ubuntu build is the demo fallback** (one-line endpoint swap).
+- Needs `OPENROUTER_API_KEY` (via `.env` or env). The device opens an outbound WS to
+  `WS_URL` (default `ws://localhost:8000/ws`).
 
 ## Conventions
 
 - **Commit identity:** author as `ashuksingh11`
   (`31301999+ashuksingh11@users.noreply.github.com`). **Push only when asked.**
-- **Workflow:** plan=Opus · design=Fable · coding=Codex CLI · browsing=Sonnet.
+- **Workflow:** plan=Opus · design=Fable (only when asked / for architecture) · coding=Codex CLI · browsing=Sonnet.
 - The canonical wire contract lives in `../goal-flow-cloud-agent/CONTRACT.md`.

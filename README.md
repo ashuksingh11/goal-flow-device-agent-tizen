@@ -1,115 +1,112 @@
 # GoalFlow Device Agent — Tizen Port
 
-This repo is the Tizen.NET host for the GoalFlow on-device agent. The portable
-core has been copied into the repo root and is reused unchanged:
+The **Tizen Family Hub** deployment of the GoalFlow on-device agent — the
+executor tier of a general goal agent. This repo has been **re-ported to the
+v2 Semantic-Kernel design** and is kept in sync with the source of truth,
+`../goal-flow-device-agent-ubuntu`.
 
-- `Contracts/`
-- `Harnesses/`
-- `Transport/WsClient.cs`
-- `Pipeline.cs`
-- `WorldState.cs`
-- `data/*.json`
+**v2 core idea: the device IS a Semantic Kernel agent.** There is no
+hand-rolled pipeline and no rules/scripted planner. Device capabilities are SK
+**plugins** whose methods are `[KernelFunction]`s the LLM calls via auto
+function-calling; safety is a deterministic `IFunctionInvocationFilter` that
+vets every pending call against the dispatch's hard constraints before the
+plugin method runs. Planning is **LLM-only** end to end, via OpenRouter.
 
-The Tizen-specific surface is deliberately small: `Program.cs` hosts the agent
-as a headless `Tizen.Applications.ServiceApplication`, `PipelineFactory.cs`
-wires the copied harness pipeline, `tizen-manifest.xml` declares the background
-service package, and `Harnesses/Adapters/TizenApis.cs` marks the real Family Hub
-integration points.
+The port is deliberately thin: the **portable v2 core is byte-for-byte
+identical to the Ubuntu build**, and only the platform edges differ.
+
+## Layout
+
+- **Portable core** (copied unchanged from ubuntu `src/GoalFlow.Device/`):
+  - `Agent/GoalAgent.cs` — the SK agent: builds the kernel, drives the
+    auto-function-calling planner, applies approvals, runs adaptation.
+  - `Contracts/*.cs` — the v2 wire contracts (Dispatch, PlanReady, Proposal,
+    Status, Approval, Control, AgentEvent, Capabilities, Hello, ContractJson).
+  - `Modules/Capabilities/*Plugin.cs` — SK capability plugins: Inventory,
+    Calendar, Recipe, ShoppingList, Reminder, Guests, ApplianceControl,
+    FamilyProfiles, Budget, Notify, plus `MockWorldStore` (the concrete world
+    over bundled `data/*.json`).
+  - `Modules/Steering/*` — deterministic harness modules: `SafetyFilter`,
+    `ApprovalCoordinator`, `Grounding`, `MonitorAdapt` (+ `MaterialityPolicy`),
+    `Clock` (`IClock` / `SimulatedClock`), `CapabilityRegistry`, `Trace`.
+  - `Transport/WsClient.cs` — the outbound WebSocket transport (BCL
+    `ClientWebSocket`, connect-retry, reconnect-on-drop, serialized sends).
+  - `data/*.json` — the mock world and sample contracts.
+- **Tizen platform edge** (the only device-specific code):
+  - `Program.cs` — `GoalFlowService : ServiceApplication`, a headless
+    Tizen service host.
+  - `DeviceHost.cs` — the DI container + SK kernel builder, mirroring the
+    Ubuntu `Program.cs` wiring so the core runs unchanged.
+  - `GoalFlow.Device.Tizen.csproj` — package manifest.
+  - `tizen-manifest.xml` — the Tizen service package descriptor.
+
+See `CODE_GUIDE.md` for the code walkthrough.
 
 ## Code-Sharing Strategy
 
-The core is copied from `../goal-flow-device-agent-ubuntu` so this repo can be
-self-contained for Tizen packaging. That keeps the port simple for the spike,
-but it creates drift risk: fixes to contracts, harnesses, planners, or transport
-must be manually copied between repos. A production version should extract a
-shared `GoalFlow.Core` library and have both Ubuntu and Tizen hosts reference it.
+The core is copied from `../goal-flow-device-agent-ubuntu` so this repo stays
+self-contained for Tizen packaging. That keeps the port simple, but it
+creates drift risk: fixes to the agent, contracts, capability plugins,
+steering modules, or transport must be manually re-copied between repos. A
+production version should extract a shared `GoalFlow.Core` library and have
+both the Ubuntu and Tizen hosts reference it.
 
-## Adapter Selection
+## v2 invariants
 
-The mock JSON adapters remain the default:
+- **LLM-only.** Planning goes through the SK kernel + OpenRouter — there is
+  no planner selection (the old rules/scripted/LLM planner switch is gone).
+- **Generic clock.** `SimulatedClock` anchors at real today, or at
+  `$GOALFLOW_DATE` if set; `set_date` / `advance_day` control frames drive it
+  from there. Nothing hardcodes a date.
+- **World is mock JSON.** `MockWorldStore` reads/writes bundled
+  `data/*.json`; there is no adapter-interface seam to pick between a mock
+  and a real backend. **Real Tizen actuator integration is future work**: it
+  means changing what a capability plugin *does* (e.g. `NotifyPlugin`,
+  `ReminderPlugin`, `ApplianceControlPlugin` calling real
+  `Tizen.Applications` APIs), not adding a parallel adapter set. The manifest
+  already reserves the alarm/notification/mediastorage privileges for that.
 
-```bash
-GOALFLOW_ADAPTERS=mock
-```
+## Build And Run
 
-To exercise the Tizen integration boundary, set:
+`dotnet build -c Debug` succeeds in a plain .NET 8 dev environment — Tizen.NET
+ships the `ServiceApplication` types as a NuGet package, so no Tizen workload
+install is needed just to compile.
 
-```bash
-GOALFLOW_ADAPTERS=tizen
-```
-
-The Tizen adapters are stubs today and throw `NotImplementedException`; they
-exist to show where Family Hub, SmartThings, Tizen calendar/alarm/notification,
-and local storage APIs plug in behind the existing adapter interfaces.
-
-Other useful environment variables:
-
-```bash
-WS_URL=wss://your-cloud.example/ws
-GOALFLOW_PLANNER=rules        # rules | scripted | llm
-GOALFLOW_DATA_DIR=data
-OPENROUTER_API_KEY=...        # only needed for GOALFLOW_PLANNER=llm
-```
-
-## Build And Deploy
-
-The local spike validates `dotnet restore` and `dotnet build`. Producing and
-installing a `.tpk` requires a real Tizen SDK/workload and a configured emulator
-or Family Hub device.
-
-Example setup and build flow:
+**Running** the service needs the Tizen runtime (the Family Hub or an
+emulator): producing and installing a `.tpk` is done manually by a human on a
+machine with the Tizen SDK, certificates, and a connected device/emulator —
+that step is out of scope for this dev environment. The Ubuntu build
+(`../goal-flow-device-agent-ubuntu`) is the demo fallback.
 
 ```bash
-# Install Tizen Studio and configure certificates/devices in its UI.
-# Install .NET/Tizen support if your SDK setup does not already include it.
-dotnet workload install tizen
-
 cd /home/chachapranu/ashu/git/goal-flow-device-agent-tizen
 dotnet restore
-dotnet build -c Release
+dotnet build -c Debug
+```
 
-# Package with the Tizen CLI from a machine with Tizen Studio installed.
+Manual Tizen packaging and deploy, on a machine with Tizen Studio:
+
+```bash
 tizen build-cs -c Release
 tizen package -t tpk -s <certificate-profile-name> -- .
-
-# Deploy to an emulator or Family Hub visible through sdb.
 sdb devices
 tizen install -n org.goalflow.deviceagent-1.0.0.tpk -t <device-name>
 ```
 
-Exact packaging commands vary by Tizen Studio version and certificate profile.
 The required package identity is in `tizen-manifest.xml`:
 `org.goalflow.deviceagent`.
 
-## Local Spike Result
+## Environment
 
-On this machine, Tizen.NET `12.0.0.18510` and Semantic Kernel `1.*` restored and
-built together for `net8.0`.
+| Variable              | Meaning                              | Default                        |
+| ---------------------- | ------------------------------------ | ------------------------------- |
+| `OPENROUTER_API_KEY`   | OpenRouter API key                   | — (**required**)                |
+| `OPENROUTER_BASE_URL`  | OpenAI-compatible base URL           | `https://openrouter.ai/api/v1`  |
+| `OPENROUTER_MODEL`     | Model id                             | `openai/gpt-oss-120b`           |
+| `WS_URL`               | Cloud hub WebSocket endpoint         | `ws://localhost:8000/ws`        |
+| `GOALFLOW_DATA_DIR`    | Mock world directory                 | `data`                          |
+| `GOALFLOW_DATE`        | `SimulatedClock` start date (ISO)    | real today                      |
+| `LOG_LEVEL`            | Console log level                    | `Information`                   |
 
-Key restore line:
-
-```text
-Restored /home/chachapranu/ashu/git/goal-flow-device-agent-tizen/GoalFlow.Device.Tizen.csproj (in 3.97 sec).
-```
-
-Key build lines:
-
-```text
-GoalFlow.Device.Tizen -> /home/chachapranu/ashu/git/goal-flow-device-agent-tizen/bin/Debug/net8.0/GoalFlow.Device.Tizen.dll
-Build succeeded.
-1 Warning(s)
-0 Error(s)
-```
-
-The warning came from Tizen's NUI XAML build target inspecting the assembly:
-
-```text
-Tizen.NUI.XamlBuild.targets(46,3): warning : Assembly is obj/Debug/net8.0/GoalFlow.Device.Tizen.dll
-```
-
-No package-compatibility errors appeared between Tizen.NET and Semantic Kernel
-in this local `net8.0` build. Runtime support on an actual Family Hub still
-needs device testing. If Semantic Kernel cannot run on-Hub, keep
-`GOALFLOW_PLANNER=rules` for deterministic local planning, or move LLM planning
-to a paired device-side/cloud service while preserving the same safety gate and
-effect execution flow.
+Loaded from `.env` in the working directory (plain `KEY=VALUE`) or the
+process environment.

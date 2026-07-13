@@ -8,9 +8,14 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <!-- TIZEN-LEAN: Tizen.NET + Semantic Kernel + Microsoft.Extensions.{Logging,DI}
+       + BCL only. Keep this list IN SYNC with the Ubuntu csproj so the copied v2
+       core (Agent/Contracts/Modules/Transport) compiles unchanged. -->
   <ItemGroup>
     <PackageReference Include="Tizen.NET" Version="12.0.0.18510" />
     <PackageReference Include="Microsoft.SemanticKernel" Version="1.*" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="*" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="*" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="*" />
     <PackageReference Include="System.Text.Json" Version="*" />
   </ItemGroup>

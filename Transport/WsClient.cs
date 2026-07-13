@@ -2,194 +2,201 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using GoalFlow.Device.Contracts;
+using Microsoft.Extensions.Logging;
 
 namespace GoalFlow.Device.Transport;
 
 /// <summary>
-/// LATER MILESTONE — thin WebSocket transport shell (DESIGN STUB).
-/// <para>
-/// The cloud is the hub; the device opens ONE outbound
-/// <see cref="ClientWebSocket"/> to it (works on both Linux dev and Tizen)
-/// and registers with a <c>hello</c> frame. The UI never talks to the device
-/// directly — everything routes through the cloud.
-/// </para>
-/// <para>
-/// This class is deliberately dumb plumbing around the transport-agnostic
-/// <see cref="Pipeline"/>: deserialize <c>dispatch</c> → Pipeline.RunAsync →
-/// serialize <c>plan_ready</c>; deserialize <c>approval</c> →
-/// Pipeline.OnApprovalAsync → serialize <c>status</c>. No policy, no state
-/// beyond the socket + outbox.
-/// </para>
-/// Resilience contract: reconnect (with backoff) on drop; re-send
-/// unacknowledged outbound messages; receiver dedupes on
-/// <c>correlation_id</c> (as does ours, via ApprovalBroker/EffectExecutor).
+/// The device's single outbound WebSocket to the cloud hub — BCL
+/// <see cref="ClientWebSocket"/> only (Tizen-lean; no transport packages).
+/// Registers with <c>hello(role: device)</c>, advertises <c>capabilities</c>,
+/// then pumps frames both ways: inbound dispatch/approval/control are routed
+/// to the GoalAgent; outbound plan_ready/proposal/status AND the high-rate
+/// STREAM of agent_event frames go out through <see cref="SendAsync{T}"/>
+/// (serialized sends — one writer at a time). Dedupes on correlation_id and
+/// reconnects with backoff, per contract.
 /// </summary>
 public sealed class WsClient : IAsyncDisposable
 {
-    private readonly Uri _cloudUri;
-    private readonly Pipeline _pipeline;
-    private readonly Harnesses.ITrace _trace;
-
+    private readonly Uri _endpoint;
+    private readonly ILogger<WsClient> _logger;
     private ClientWebSocket? _socket;
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
+    private readonly HashSet<string> _seenCorrelations = [];
+    private CapabilitiesMessage? _capabilities;
 
-    /// <param name="cloudUri">Cloud hub WS endpoint, e.g. wss://cloud.example/ws — Tizen port is a one-line endpoint swap.</param>
-    public WsClient(Uri cloudUri, Pipeline pipeline, Harnesses.ITrace trace)
+    public WsClient(Uri endpoint, ILogger<WsClient> logger)
     {
-        _cloudUri = cloudUri;
-        _pipeline = pipeline;
-        _trace = trace;
+        _endpoint = endpoint;
+        _logger = logger;
     }
 
+    /// <summary>Raised for each inbound frame, keyed by its <c>type</c> discriminator.</summary>
+    public event Func<string /*type*/, string /*rawJson*/, Task>? FrameReceived;
+
     /// <summary>
-    /// Connects, performs the hello/hello_ack handshake, then runs the
-    /// receive loop until cancelled. Reconnects with backoff on drop.
+    /// Connects, sends <c>hello</c>, awaits <c>hello_ack</c>, then sends the
+    /// capabilities advertisement. Retries with exponential backoff.
     /// </summary>
-    public async Task RunAsync(CancellationToken cancellationToken = default)
+    public Task ConnectAsync(CapabilitiesMessage capabilities, CancellationToken ct = default)
     {
-        while (!cancellationToken.IsCancellationRequested)
+        _capabilities = capabilities;
+        return ConnectWithRetryAsync(ct);
+    }
+
+    /// <summary>Connects, retrying with exponential backoff (1s→10s) until it
+    /// succeeds or is cancelled — so the device can start before the cloud, and
+    /// survive the cloud restarting.</summary>
+    private async Task ConnectWithRetryAsync(CancellationToken ct)
+    {
+        var delay = TimeSpan.FromSeconds(1);
+        var max = TimeSpan.FromSeconds(10);
+        while (!ct.IsCancellationRequested)
         {
             try
             {
-                using var socket = new ClientWebSocket();
-                _socket = socket;
-
-                Console.Error.WriteLine($"connecting to {_cloudUri}");
-                await socket.ConnectAsync(_cloudUri, cancellationToken);
-                await SendAsync(new Hello(), cancellationToken);
-                Console.Error.WriteLine("sent hello frame");
-
-                await ReceiveLoopAsync(socket, cancellationToken);
+                await ConnectOnceAsync(ct);
+                return;
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException)
             {
-                break;
+                throw;
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"websocket disconnected: {ex.Message}");
-            }
-            finally
-            {
-                _socket = null;
-            }
-
-            if (!cancellationToken.IsCancellationRequested)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+                _logger.LogWarning("ws_connect_failed {Endpoint}: {Message}; retrying in {Seconds}s",
+                    _endpoint, ex.Message, delay.TotalSeconds);
+                await Task.Delay(delay, ct);
+                delay = TimeSpan.FromTicks(Math.Min(delay.Ticks * 2, max.Ticks));
             }
         }
     }
 
-    /// <summary>Serializes any contract message and sends it as one text frame.</summary>
-    public async Task SendAsync<TMessage>(TMessage message, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Receive pump: reassembles text frames, peeks <c>type</c> via
+    /// ContractJson.PeekType, dedupes repeated correlation_ids, raises
+    /// <see cref="FrameReceived"/>. Runs until cancellation or socket close;
+    /// reconnects on drop.
+    /// </summary>
+    public Task RunReceiveLoopAsync(CancellationToken ct = default)
+        => ReceiveLoopAsync(ct);
+
+    /// <summary>
+    /// Sends one contract message (ContractJson snake_case). Safe to call
+    /// concurrently — agent_event streaming interleaves with plan_ready/status
+    /// sends, so writes are serialized on <see cref="_sendLock"/>.
+    /// </summary>
+    public Task SendAsync<T>(T message, CancellationToken ct = default)
+        => SendCoreAsync(message, ct);
+
+    public ValueTask DisposeAsync()
     {
-        if (_socket is null || _socket.State != WebSocketState.Open)
-        {
-            throw new InvalidOperationException("WebSocket is not connected.");
-        }
-
-        var json = JsonSerializer.Serialize(message, ContractJson.Options);
-        var bytes = Encoding.UTF8.GetBytes(json);
-        await _socket.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken);
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        if (_socket is { State: WebSocketState.Open } socket)
-        {
-            await socket.CloseAsync(
-                WebSocketCloseStatus.NormalClosure,
-                "device shutting down",
-                CancellationToken.None);
-        }
-
         _socket?.Dispose();
+        _sendLock.Dispose();
+        return ValueTask.CompletedTask;
     }
 
-    private async Task ReceiveLoopAsync(ClientWebSocket socket, CancellationToken cancellationToken)
+    private async Task ConnectOnceAsync(CancellationToken ct)
     {
-        while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
+        _socket?.Dispose();
+        _socket = new ClientWebSocket();
+        await _socket.ConnectAsync(_endpoint, ct);
+        _logger.LogInformation("ws_connected {Endpoint}", _endpoint);
+        await SendAsync(new Hello(), ct);
+        await SendAsync(_capabilities!, ct);
+    }
+
+    private async Task ReceiveLoopAsync(CancellationToken ct)
+    {
+        var buffer = new byte[16 * 1024];
+        while (!ct.IsCancellationRequested)
         {
-            var json = await ReceiveTextFrameAsync(socket, cancellationToken);
-            if (json is null)
+          try
+          {
+            if (_socket is null || _socket.State != WebSocketState.Open)
             {
-                return;
+                await ConnectWithRetryAsync(ct);
             }
 
-            using var document = JsonDocument.Parse(json);
-            if (!document.RootElement.TryGetProperty("type", out var typeElement))
+            using var ms = new MemoryStream();
+            WebSocketReceiveResult result;
+            do
             {
-                Console.Error.WriteLine("ignoring websocket frame without type");
+                result = await _socket!.ReceiveAsync(buffer, ct);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", ct);
+                    return;
+                }
+
+                ms.Write(buffer, 0, result.Count);
+            }
+            while (!result.EndOfMessage);
+
+            var raw = Encoding.UTF8.GetString(ms.ToArray());
+            var type = ContractJson.PeekType(raw);
+            if (type is null)
+            {
                 continue;
             }
 
-            switch (typeElement.GetString())
+            // Dedupe only replay-prone frames. approval/control are USER COMMANDS
+            // that legitimately repeat with the same goal correlation_id but carry
+            // distinct content (approving different proposals, advancing days) — the
+            // app layer (ApprovalCoordinator) handles their idempotency. Deduping
+            // them here silently dropped every approval after the first.
+            var dedupeable = type is not (MessageTypes.Approval or MessageTypes.Control);
+            var correlation = TryGetCorrelation(raw);
+            if (dedupeable && correlation is not null && !_seenCorrelations.Add($"{type}:{correlation}"))
             {
-                case MessageTypes.Dispatch:
-                    var dispatch = JsonSerializer.Deserialize<Dispatch>(json, ContractJson.Options)
-                        ?? throw new InvalidOperationException("Unable to deserialize dispatch frame.");
-                    var planReady = await _pipeline.RunAsync(dispatch, cancellationToken);
-                    await SendAsync(planReady, cancellationToken);
-                    Console.Error.WriteLine($"sent plan_ready for {planReady.GoalId}/{planReady.CorrelationId}");
-                    break;
-
-                case MessageTypes.HelloAck:
-                    Console.Error.WriteLine("received hello_ack");
-                    break;
-
-                case MessageTypes.Approval:
-                    var approval = JsonSerializer.Deserialize<Approval>(json, ContractJson.Options)
-                        ?? throw new InvalidOperationException("Unable to deserialize approval frame.");
-                    var statuses = await _pipeline.OnApprovalAsync(approval, cancellationToken);
-                    foreach (var status in statuses)
-                    {
-                        await SendAsync(status, cancellationToken);
-                        Console.Error.WriteLine($"sent status {status.TaskStatus} for {status.GoalId}/{status.CorrelationId}");
-                    }
-
-                    break;
-
-                case MessageTypes.Control:
-                    var control = JsonSerializer.Deserialize<Control>(json, ContractJson.Options)
-                        ?? throw new InvalidOperationException("Unable to deserialize control frame.");
-                    var messages = await _pipeline.OnControlAsync(control, cancellationToken);
-                    foreach (var message in messages)
-                    {
-                        await SendAsync(message, cancellationToken);
-                        Console.Error.WriteLine($"sent control response for {control.GoalId}/{control.Command}");
-                    }
-
-                    break;
-
-                default:
-                    Console.Error.WriteLine($"ignoring websocket frame type '{typeElement.GetString()}'");
-                    break;
+                _logger.LogInformation("ws_duplicate_ignored type={Type} correlation_id={CorrelationId}", type, correlation);
+                continue;
             }
+
+            if (FrameReceived is not null)
+            {
+                await FrameReceived.Invoke(type, raw);
+            }
+          }
+          catch (OperationCanceledException)
+          {
+              break;
+          }
+          catch (Exception ex)
+          {
+              // Any transport error (cloud down / restarted / dropped) → drop the
+              // socket and let the next iteration reconnect with backoff. Never crash.
+              _logger.LogWarning("ws_receive_error: {Message}; reconnecting", ex.Message);
+              _socket?.Dispose();
+              _socket = null;
+              try { await Task.Delay(TimeSpan.FromSeconds(1), ct); }
+              catch (OperationCanceledException) { break; }
+          }
         }
     }
 
-    private static async Task<string?> ReceiveTextFrameAsync(
-        ClientWebSocket socket,
-        CancellationToken cancellationToken)
+    private async Task SendCoreAsync<T>(T message, CancellationToken ct)
     {
-        var buffer = new byte[8192];
-        using var stream = new MemoryStream();
-
-        while (true)
+        if (_socket is null || _socket.State != WebSocketState.Open)
         {
-            var result = await socket.ReceiveAsync(buffer, cancellationToken);
-            if (result.MessageType == WebSocketMessageType.Close)
-            {
-                return null;
-            }
-
-            stream.Write(buffer, 0, result.Count);
-            if (result.EndOfMessage)
-            {
-                break;
-            }
+            throw new InvalidOperationException("WebSocket is not open.");
         }
 
-        return Encoding.UTF8.GetString(stream.ToArray());
+        var bytes = Encoding.UTF8.GetBytes(ContractJson.Serialize(message));
+        await _sendLock.WaitAsync(ct);
+        try
+        {
+            await _socket.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
+
+    private static string? TryGetCorrelation(string raw)
+    {
+        using var doc = JsonDocument.Parse(raw);
+        return doc.RootElement.TryGetProperty("correlation_id", out var c) ? c.GetString() : null;
     }
 }

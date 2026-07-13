@@ -1,62 +1,67 @@
-using System.Text.Json.Serialization;
-
 namespace GoalFlow.Device.Contracts;
 
 /// <summary>
-/// Device → cloud (<c>type: "status"</c>): lifecycle progress note.
-/// <code>{ "type":"status","goal_id":"meal-2026-w29","correlation_id":"disp-001",
-///   "task_status":"executing","payload":{"note":"..."} }</code>
+/// Lifecycle/heartbeat frame, device → cloud → ui (<c>type: "status"</c>).
+/// Reports the task-status plus what executed and where the (generic) clock is.
 /// </summary>
-public sealed record StatusMessage
+public sealed record Status
 {
-    [JsonPropertyName("type")]
     public string Type { get; init; } = MessageTypes.Status;
 
-    [JsonPropertyName("goal_id")]
     public required string GoalId { get; init; }
 
-    [JsonPropertyName("correlation_id")]
-    public required string CorrelationId { get; init; }
+    public string? CorrelationId { get; init; }
 
-    /// <summary>See <see cref="TaskStatuses"/>.</summary>
-    [JsonPropertyName("task_status")]
+    /// <summary>One of <see cref="TaskStatuses"/>.</summary>
     public required string TaskStatus { get; init; }
 
-    [JsonPropertyName("payload")]
     public required StatusPayload Payload { get; init; }
 }
 
-/// <summary>Payload of <see cref="StatusMessage"/>.</summary>
 public sealed record StatusPayload
 {
-    [JsonPropertyName("executed")]
-    public IReadOnlyList<ExecutedEffect>? Executed { get; init; }
-
-    [JsonPropertyName("day")]
+    /// <summary>Human day label within the window, e.g. "Wed" (optional).</summary>
     public string? Day { get; init; }
 
-    [JsonPropertyName("sim_date")]
+    /// <summary>Current clock date (ISO) — real today, or the simulated date after set_date/advance_day.</summary>
     public string? SimDate { get; init; }
 
-    [JsonPropertyName("note")]
-    public required string Note { get; init; }
+    /// <summary>Presenter-fired demo event id that produced this status, when applicable.</summary>
+    public string? EventId { get; init; }
 
-    [JsonPropertyName("material")]
-    public bool? Material { get; init; }
+    /// <summary>Whether the last observed world change was material (triggered adaptation).</summary>
+    public bool Material { get; init; }
+
+    /// <summary>Effects executed by this approval (objects, not bare ids), so the
+    /// UI can confirm what happened (e.g. "5 items added to shopping list").</summary>
+    public IReadOnlyList<ExecutedEffect> Executed { get; init; } = [];
+
+    /// <summary>After a daily adaptation is approved: the FULL updated plan, so the
+    /// UI replaces the plan card in place. Null when the approval didn't re-plan.</summary>
+    public IReadOnlyList<PlanItem>? UpdatedPlan { get; init; }
+
+    /// <summary>Ids in <see cref="UpdatedPlan"/> that this adaptation changed —
+    /// the UI highlights them so the daily change is visible.</summary>
+    public IReadOnlyList<string> ChangedIds { get; init; } = [];
+
+    /// <summary>Impact badges to add/replace on the plan card after the adaptation.</summary>
+    public IReadOnlyList<ImpactItem> ImpactDelta { get; init; } = [];
+
+    public string? Note { get; init; }
 }
 
-/// <summary>One executed approved effect reported in a status payload.</summary>
+/// <summary>One executed side-effect, reported in <see cref="StatusPayload.Executed"/>.
+/// Serializes snake_case: proposal_id / action / result / detail.</summary>
 public sealed record ExecutedEffect
 {
-    [JsonPropertyName("proposal_id")]
     public required string ProposalId { get; init; }
 
-    [JsonPropertyName("action")]
-    public required string Action { get; init; }
+    /// <summary>The action performed, e.g. "ShoppingList.Add".</summary>
+    public string? Action { get; init; }
 
-    [JsonPropertyName("result")]
-    public required string Result { get; init; }
+    /// <summary>Outcome marker, e.g. "executed".</summary>
+    public string? Result { get; init; }
 
-    [JsonPropertyName("detail")]
-    public required string Detail { get; init; }
+    /// <summary>Human-readable detail, e.g. the tool's returned summary.</summary>
+    public string? Detail { get; init; }
 }

@@ -1,0 +1,157 @@
+using GoalFlow.Device.Agent;
+using GoalFlow.Device.Modules.Capabilities;
+using GoalFlow.Device.Modules.Steering;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.SemanticKernel;
+
+namespace GoalFlow.Device;
+
+/// <summary>
+/// Tizen host wiring for the portable v2 GoalFlow core. This is the ONLY
+/// platform-specific seam besides <see cref="GoalFlowService"/> (the
+/// ServiceApplication host): it builds the same dependency-injection container
+/// as the Ubuntu <c>Program.cs</c> so the SK agent + capability plugins +
+/// steering modules run byte-for-byte unchanged on the Family Hub.
+///
+/// v2 is LLM-ONLY (planning goes through the SK kernel + OpenRouter — there is
+/// no rules/scripted planner) and the world is a concrete <see cref="MockWorldStore"/>
+/// over bundled <c>data/*.json</c>. The v1 <c>GOALFLOW_ADAPTERS=mock|tizen</c>
+/// adapter-interface seam is gone; wiring real Tizen actuators (calendar,
+/// notifications, appliances) is future work behind the capability plugins —
+/// swap what a plugin does, not a separate adapter set. The manifest already
+/// reserves the alarm/notification/storage privileges for that.
+/// </summary>
+public sealed class DeviceHost : IAsyncDisposable
+{
+    public ServiceProvider Provider { get; }
+    public ILoggerFactory LoggerFactory { get; }
+    public IClock Clock { get; }
+    public Kernel Kernel { get; }
+    public CapabilityRegistry Capabilities { get; }
+
+    private DeviceHost(
+        ServiceProvider provider,
+        ILoggerFactory loggerFactory,
+        IClock clock,
+        Kernel kernel,
+        CapabilityRegistry capabilities)
+    {
+        Provider = provider;
+        LoggerFactory = loggerFactory;
+        Clock = clock;
+        Kernel = kernel;
+        Capabilities = capabilities;
+    }
+
+    /// <summary>Build the DI container + kernel. Mirrors Ubuntu Program.cs.</summary>
+    public static DeviceHost Build(string dataDir)
+    {
+        var services = new ServiceCollection();
+
+        services.AddLogging(logging => logging
+            .ClearProviders()
+            .AddConsole()
+            .SetMinimumLevel(ParseLogLevel() ?? LogLevel.Information));
+
+        // GENERIC CLOCK: SimulatedClock anchored at real today (or $GOALFLOW_DATE),
+        // so the demo's set_date / advance_day controls work. No hardcoded anchor.
+        services.AddSingleton<IClock>(_ =>
+            Environment.GetEnvironmentVariable("GOALFLOW_DATE") is { Length: > 0 } start
+                ? new SimulatedClock(DateOnly.Parse(start))
+                : new SimulatedClock());
+
+        // Mock world + capability plugins (meal + guest domains + shared).
+        services.AddSingleton(sp => new MockWorldStore(dataDir, sp.GetRequiredService<IClock>()));
+        services.AddSingleton<InventoryPlugin>();
+        services.AddSingleton<CalendarPlugin>();
+        services.AddSingleton<RecipePlugin>();
+        services.AddSingleton<ShoppingListPlugin>();
+        services.AddSingleton<ReminderPlugin>();
+        services.AddSingleton<GuestsPlugin>();
+        services.AddSingleton<ApplianceControlPlugin>();
+        services.AddSingleton<FamilyProfilesPlugin>();
+        services.AddSingleton<BudgetPlugin>();
+        services.AddSingleton<NotifyPlugin>();
+
+        // Steering modules.
+        services.AddSingleton<SafetyFilter>();
+        services.AddSingleton<ApprovalCoordinator>();
+        services.AddSingleton<Grounding>();
+        services.AddSingleton<MaterialityPolicy>();
+        services.AddSingleton<MonitorAdapt>();
+        services.AddSingleton<CapabilityRegistry>();
+
+        var provider = services.BuildServiceProvider();
+        var loggerFactory = provider.GetRequiredService<ILoggerFactory>();
+
+        var settings = new AgentSettings
+        {
+            ApiKey = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY")
+                ?? throw new InvalidOperationException("OPENROUTER_API_KEY is required."),
+            BaseUrl = Environment.GetEnvironmentVariable("OPENROUTER_BASE_URL") ?? "https://openrouter.ai/api/v1",
+            ModelId = Environment.GetEnvironmentVariable("OPENROUTER_MODEL") ?? "openai/gpt-oss-120b",
+        };
+        var kernel = GoalAgent.BuildKernel(settings, provider);
+
+        return new DeviceHost(
+            provider,
+            loggerFactory,
+            provider.GetRequiredService<IClock>(),
+            kernel,
+            provider.GetRequiredService<CapabilityRegistry>());
+    }
+
+    /// <summary>
+    /// Build a <see cref="GoalAgent"/> bound to a <see cref="Trace"/> whose
+    /// agent_event stream is emitted by the caller (the transport). Kept off the
+    /// container because <c>emit</c> depends on the live WebSocket.
+    /// </summary>
+    public GoalAgent CreateAgent(Trace trace) => new(
+        Kernel,
+        trace,
+        Provider.GetRequiredService<Grounding>(),
+        Provider.GetRequiredService<SafetyFilter>(),
+        Provider.GetRequiredService<ApprovalCoordinator>(),
+        Provider.GetRequiredService<MonitorAdapt>(),
+        Clock,
+        LoggerFactory.CreateLogger<GoalAgent>());
+
+    /// <summary>Minimal KEY=VALUE .env loader (BCL only; missing file is fine).</summary>
+    public static void LoadDotEnv(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return;
+        }
+
+        foreach (var rawLine in File.ReadAllLines(path))
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0 || line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var equals = line.IndexOf('=');
+            if (equals <= 0)
+            {
+                continue;
+            }
+
+            var key = line[..equals].Trim();
+            var value = line[(equals + 1)..].Trim().Trim('"');
+            if (Environment.GetEnvironmentVariable(key) is null)
+            {
+                Environment.SetEnvironmentVariable(key, value);
+            }
+        }
+    }
+
+    private static LogLevel? ParseLogLevel()
+        => Enum.TryParse<LogLevel>(Environment.GetEnvironmentVariable("LOG_LEVEL"), ignoreCase: true, out var level)
+            ? level
+            : null;
+
+    public async ValueTask DisposeAsync() => await Provider.DisposeAsync();
+}
