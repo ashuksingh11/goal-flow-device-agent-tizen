@@ -33,13 +33,38 @@ plain copy of the core + a `dotnet build`.
     and starts the connect/receive loop on a background task (OnCreate must return);
     `OnTerminate` cancels + disposes.
   - `DeviceHost.cs` — the DI container + kernel builder. Mirrors the Ubuntu `Program.cs`
-    wiring exactly so the core runs unchanged. Env: `OPENROUTER_*`, `WS_URL`,
-    `GOALFLOW_DATA_DIR`, `GOALFLOW_DATE`, `LOG_LEVEL`.
+    wiring, but reads config via `DeviceConfig` (NOT env vars) and logs via dlog (NOT console).
+  - `DeviceConfig.cs` — **env-free config** (see Tizen platform notes). Reads a bundled
+    `goalflow.conf` (KEY=VALUE); keys: `OPENROUTER_API_KEY` (required), `OPENROUTER_BASE_URL`,
+    `OPENROUTER_MODEL`, `WS_URL`, `GOALFLOW_DATA_DIR`, `GOALFLOW_DATE`, `LOG_LEVEL`. Also
+    seeds a writable `data/` copy in the app Data dir.
+  - `DlogLogger.cs` — `ILoggerProvider` routing `Microsoft.Extensions.Logging` → `Tizen.Log`
+    (dlog). View logs on the Hub with `dlogutil GOALFLOW`.
   - `GoalFlow.Device.Tizen.csproj` — net8.0 + Tizen.NET 12.x + Semantic Kernel +
     Microsoft.Extensions.{Logging,Console,DI}. Keep the package list in sync with the
-    Ubuntu csproj.
+    Ubuntu csproj. Bundles `data/**/*.json` + (if present) `goalflow.conf`.
   - `tizen-manifest.xml` — `service-application` (headless), internet + alarm +
     notification + mediastorage privileges (reserved for real actuators).
+
+## Tizen platform notes (do NOT regress — these caused real on-Hub crashes)
+
+A headless Tizen `ServiceApplication` is not a normal console process. Three
+platform edges differ from the Ubuntu build and are handled ONLY in the Tizen
+edge files (the portable core is untouched):
+
+1. **No console → dlog.** The service has no stdout; `Microsoft.Extensions.Logging`'s
+   `AddConsole()` crashes. `DlogLoggerProvider` routes logs to `Tizen.Log` instead
+   (`DeviceHost` wires it, never `AddConsole`). Tail with `dlogutil GOALFLOW`.
+2. **No environment variables.** A Tizen service is not launched with the shell
+   environment, and its CWD is not the app dir — so `Environment.GetEnvironmentVariable`
+   and a CWD-relative `.env` both fail (this is why `OPENROUTER_API_KEY` was null →
+   throw). Config comes from `DeviceConfig` reading a bundled `goalflow.conf`
+   (copy `goalflow.conf.example` → `goalflow.conf`, gitignored, holds the API key).
+   Env vars still win off-device (desktop parity).
+3. **Read-only resource dir.** `MockWorldStore` mutates `data/*.json`, but the .tpk
+   bundles `data/` read-only under `Application.Current.DirectoryInfo.Resource`.
+   `DeviceConfig.ResolveDataDir()` seeds a writable copy into the app `Data` dir on
+   first run and points the store there.
 
 ## v2 invariants (do NOT regress)
 

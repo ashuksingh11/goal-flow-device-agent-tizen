@@ -96,17 +96,30 @@ tizen install -n org.goalflow.deviceagent-1.0.0.tpk -t <device-name>
 The required package identity is in `tizen-manifest.xml`:
 `org.goalflow.deviceagent`.
 
-## Environment
+## Configuration
 
-| Variable              | Meaning                              | Default                        |
+| Key                    | Meaning                              | Default                        |
 | ---------------------- | ------------------------------------ | ------------------------------- |
 | `OPENROUTER_API_KEY`   | OpenRouter API key                   | — (**required**)                |
 | `OPENROUTER_BASE_URL`  | OpenAI-compatible base URL           | `https://openrouter.ai/api/v1`  |
 | `OPENROUTER_MODEL`     | Model id                             | `openai/gpt-oss-120b`           |
 | `WS_URL`               | Cloud hub WebSocket endpoint         | `ws://localhost:8000/ws`        |
-| `GOALFLOW_DATA_DIR`    | Mock world directory                 | `data`                          |
+| `GOALFLOW_DATA_DIR`    | Mock world directory                 | seeded writable copy (see below)|
 | `GOALFLOW_DATE`        | `SimulatedClock` start date (ISO)    | real today                      |
-| `LOG_LEVEL`            | Console log level                    | `Information`                   |
+| `LOG_LEVEL`            | Log level                            | `Information`                   |
 
-Loaded from `.env` in the working directory (plain `KEY=VALUE`) or the
-process environment.
+**Tizen reads config from a file, not the environment.** A Tizen
+`ServiceApplication` is not launched with the shell environment, so `DeviceConfig`
+reads a bundled `goalflow.conf` (plain `KEY=VALUE`) — copy `goalflow.conf.example`
+→ `goalflow.conf` and fill it in (it is gitignored; it holds the API key). It is
+packaged into the `.tpk` resource dir; a writable override may also be dropped in
+the app Data dir. **Off-device** (desktop / Ubuntu-parity), environment variables
+take precedence, so the same build still works from a shell.
+
+Two more Tizen platform edges (handled automatically):
+
+- **Logging goes to dlog**, not the console (a headless service has no stdout).
+  Tail it on the Hub with `dlogutil GOALFLOW`.
+- **The mock world is seeded into a writable dir.** The `.tpk` bundles `data/`
+  read-only under the resource dir, but `MockWorldStore` mutates it, so on first
+  run a writable copy is seeded into the app Data dir.

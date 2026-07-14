@@ -1,0 +1,31 @@
+# GoalFlow device agent — Tizen config (KEY=VALUE)
+#
+# WHY THIS FILE: a Tizen ServiceApplication is NOT launched with the shell
+# environment, so environment variables (OPENROUTER_API_KEY, WS_URL, ...) are
+# unavailable on the Hub. DeviceConfig reads this file instead. Off-device
+# (desktop / Ubuntu-parity) environment variables still take precedence.
+#
+# SETUP: copy this to `goalflow.conf` and fill in real values. `goalflow.conf`
+# is gitignored (it holds a secret). It is bundled into the .tpk (resource dir)
+# by the csproj; an on-device writable override may also be placed in the app
+# Data dir.
+
+# Required — your OpenRouter API key.
+OPENROUTER_API_KEY=sk-or-...
+
+# Optional — defaults shown.
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL=openai/gpt-oss-120b
+
+# Cloud hub WebSocket endpoint the device dials out to.
+WS_URL=ws://localhost:8000/ws
+
+# Optional — start the simulated clock at a fixed date (ISO). Default: real today.
+# GOALFLOW_DATE=2026-07-14
+
+# Optional — override the mock-world data directory. Default: a writable copy
+# seeded into the app Data dir from the bundled resource data.
+# GOALFLOW_DATA_DIR=/opt/usr/home/owner/apps_rw/org.goalflow.deviceagent/data
+
+# Optional — log level (Trace|Debug|Information|Warning|Error). Default: Information.
+# LOG_LEVEL=Information

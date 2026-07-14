@@ -24,6 +24,12 @@
     <Content Include="data/**/*.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Env-free config bundled into the .tpk resource dir (Tizen services get no
+         shell environment). goalflow.conf is gitignored (holds a secret); copy
+         goalflow.conf.example → goalflow.conf and fill it in before packaging. -->
+    <Content Include="goalflow.conf" Condition="Exists('goalflow.conf')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

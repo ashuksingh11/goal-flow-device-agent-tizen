@@ -13,6 +13,7 @@ artifacts/
 
 # Secrets / local env
 .env
+goalflow.conf
 *.local.json
 
 # OS cruft

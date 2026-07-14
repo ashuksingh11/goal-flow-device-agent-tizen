@@ -10,17 +10,22 @@ namespace GoalFlow.Device;
 /// <summary>
 /// Tizen host wiring for the portable v2 GoalFlow core. This is the ONLY
 /// platform-specific seam besides <see cref="GoalFlowService"/> (the
-/// ServiceApplication host): it builds the same dependency-injection container
-/// as the Ubuntu <c>Program.cs</c> so the SK agent + capability plugins +
-/// steering modules run byte-for-byte unchanged on the Family Hub.
+/// ServiceApplication host), <see cref="DeviceConfig"/> (env-free config) and
+/// <see cref="DlogLoggerProvider"/> (dlog logging): it builds the same
+/// dependency-injection container as the Ubuntu <c>Program.cs</c> so the SK
+/// agent + capability plugins + steering modules run byte-for-byte unchanged on
+/// the Family Hub.
 ///
 /// v2 is LLM-ONLY (planning goes through the SK kernel + OpenRouter — there is
 /// no rules/scripted planner) and the world is a concrete <see cref="MockWorldStore"/>
 /// over bundled <c>data/*.json</c>. The v1 <c>GOALFLOW_ADAPTERS=mock|tizen</c>
 /// adapter-interface seam is gone; wiring real Tizen actuators (calendar,
-/// notifications, appliances) is future work behind the capability plugins —
-/// swap what a plugin does, not a separate adapter set. The manifest already
-/// reserves the alarm/notification/storage privileges for that.
+/// notifications, appliances) is future work behind the capability plugins.
+///
+/// PLATFORM NOTE: config is read via <see cref="DeviceConfig"/> (a bundled
+/// <c>goalflow.conf</c>), NOT environment variables — a Tizen service is not
+/// launched with the shell environment. Logging goes to dlog, NOT the console —
+/// a headless service has no stdout, so <c>AddConsole()</c> crashes on the Hub.
 /// </summary>
 public sealed class DeviceHost : IAsyncDisposable
 {
@@ -45,19 +50,20 @@ public sealed class DeviceHost : IAsyncDisposable
     }
 
     /// <summary>Build the DI container + kernel. Mirrors Ubuntu Program.cs.</summary>
-    public static DeviceHost Build(string dataDir)
+    public static DeviceHost Build(DeviceConfig config, string dataDir)
     {
         var services = new ServiceCollection();
 
+        // dlog (NOT console) — a headless Tizen service has no stdout.
         services.AddLogging(logging => logging
             .ClearProviders()
-            .AddConsole()
-            .SetMinimumLevel(ParseLogLevel() ?? LogLevel.Information));
+            .AddProvider(new DlogLoggerProvider())
+            .SetMinimumLevel(ParseLogLevel(config) ?? LogLevel.Information));
 
-        // GENERIC CLOCK: SimulatedClock anchored at real today (or $GOALFLOW_DATE),
+        // GENERIC CLOCK: SimulatedClock anchored at real today (or GOALFLOW_DATE),
         // so the demo's set_date / advance_day controls work. No hardcoded anchor.
         services.AddSingleton<IClock>(_ =>
-            Environment.GetEnvironmentVariable("GOALFLOW_DATE") is { Length: > 0 } start
+            config.Get("GOALFLOW_DATE") is { Length: > 0 } start
                 ? new SimulatedClock(DateOnly.Parse(start))
                 : new SimulatedClock());
 
@@ -87,10 +93,9 @@ public sealed class DeviceHost : IAsyncDisposable
 
         var settings = new AgentSettings
         {
-            ApiKey = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY")
-                ?? throw new InvalidOperationException("OPENROUTER_API_KEY is required."),
-            BaseUrl = Environment.GetEnvironmentVariable("OPENROUTER_BASE_URL") ?? "https://openrouter.ai/api/v1",
-            ModelId = Environment.GetEnvironmentVariable("OPENROUTER_MODEL") ?? "openai/gpt-oss-120b",
+            ApiKey = config.GetRequired("OPENROUTER_API_KEY"),
+            BaseUrl = config.Get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            ModelId = config.Get("OPENROUTER_MODEL", "openai/gpt-oss-120b"),
         };
         var kernel = GoalAgent.BuildKernel(settings, provider);
 
@@ -117,39 +122,8 @@ public sealed class DeviceHost : IAsyncDisposable
         Clock,
         LoggerFactory.CreateLogger<GoalAgent>());
 
-    /// <summary>Minimal KEY=VALUE .env loader (BCL only; missing file is fine).</summary>
-    public static void LoadDotEnv(string path)
-    {
-        if (!File.Exists(path))
-        {
-            return;
-        }
-
-        foreach (var rawLine in File.ReadAllLines(path))
-        {
-            var line = rawLine.Trim();
-            if (line.Length == 0 || line.StartsWith('#'))
-            {
-                continue;
-            }
-
-            var equals = line.IndexOf('=');
-            if (equals <= 0)
-            {
-                continue;
-            }
-
-            var key = line[..equals].Trim();
-            var value = line[(equals + 1)..].Trim().Trim('"');
-            if (Environment.GetEnvironmentVariable(key) is null)
-            {
-                Environment.SetEnvironmentVariable(key, value);
-            }
-        }
-    }
-
-    private static LogLevel? ParseLogLevel()
-        => Enum.TryParse<LogLevel>(Environment.GetEnvironmentVariable("LOG_LEVEL"), ignoreCase: true, out var level)
+    private static LogLevel? ParseLogLevel(DeviceConfig config)
+        => Enum.TryParse<LogLevel>(config.Get("LOG_LEVEL"), ignoreCase: true, out var level)
             ? level
             : null;
 

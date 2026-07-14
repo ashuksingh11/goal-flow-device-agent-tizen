@@ -26,11 +26,13 @@ public sealed class GoalFlowService : ServiceApplication
     {
         base.OnCreate();
 
-        DeviceHost.LoadDotEnv(Path.Combine(Directory.GetCurrentDirectory(), ".env"));
-        var dataDir = Environment.GetEnvironmentVariable("GOALFLOW_DATA_DIR") ?? "data";
-        _host = DeviceHost.Build(dataDir);
+        // Env-free config (Tizen services aren't launched with the shell env) —
+        // reads a bundled goalflow.conf; see DeviceConfig.
+        var config = DeviceConfig.Load();
+        var dataDir = config.ResolveDataDir();
+        _host = DeviceHost.Build(config, dataDir);
 
-        var wsUrl = Environment.GetEnvironmentVariable("WS_URL") ?? "ws://localhost:8000/ws";
+        var wsUrl = config.Get("WS_URL", "ws://localhost:8000/ws");
         _cts = new CancellationTokenSource();
         _connectLoop = Task.Run(() => RunAsync(new Uri(wsUrl), _cts.Token));
     }
