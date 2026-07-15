@@ -6,18 +6,32 @@
     <RootNamespace>GoalFlow.Device</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Copy ALL resolved dependencies into the app bin so the platform can load
+         them app-local (and so AssemblyResolver's bin-probing fallback works). -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <!-- SK 1.43 still gates the custom-endpoint OpenAI connector + ResponseFormat
+         behind experimental diagnostics (SKEXP0010) and the filter/kernel APIs
+         behind SKEXP0001; SK 1.78 (the Ubuntu pin) graduated them to stable, so
+         the byte-identical core has no pragmas. Suppress here — Tizen only. -->
+    <NoWarn>$(NoWarn);SKEXP0001;SKEXP0010</NoWarn>
   </PropertyGroup>
 
-  <!-- TIZEN-LEAN: Tizen.NET + Semantic Kernel + Microsoft.Extensions.{Logging,DI}
-       + BCL only. Keep this list IN SYNC with the Ubuntu csproj so the copied v2
-       core (Agent/Contracts/Modules/Transport) compiles unchanged. -->
+  <!-- TIZEN-LEAN + PINNED TO THE .NET 8 LINE. Tizen 12 runs on .NET 8 and ships
+       its OWN System.Text.Json (a platform assembly loaded before app-local ones),
+       so we must NOT drag in newer major versions. Wildcards (*/1.*) resolved to
+       .NET 10-era packages (STJ 10.0.9, SK 1.78 which requires STJ 10.0.6) that the
+       Tizen runtime refuses to load. SemanticKernel 1.43.0 is the newest SK line
+       whose System.Text.Json dependency is still 8.0.5 (SK >= ~1.61 jumps to 10.x)
+       and it retains everything v2 uses (kernel, auto function-calling,
+       IFunctionInvocationFilter). Do NOT bump these without checking the SK->STJ
+       transitive dependency stays on 8.0.x. The Ubuntu csproj can stay on latest. -->
   <ItemGroup>
     <PackageReference Include="Tizen.NET" Version="12.0.0.18510" />
-    <PackageReference Include="Microsoft.SemanticKernel" Version="1.*" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="*" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="*" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="*" />
-    <PackageReference Include="System.Text.Json" Version="*" />
+    <PackageReference Include="Microsoft.SemanticKernel" Version="1.43.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
 
   <ItemGroup>

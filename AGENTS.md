@@ -48,13 +48,17 @@ plain copy of the core + a `dotnet build`.
 
 ## Tizen platform notes (do NOT regress — these caused real on-Hub crashes)
 
-A headless Tizen `ServiceApplication` is not a normal console process. Three
+A headless Tizen `ServiceApplication` is not a normal console process. These
 platform edges differ from the Ubuntu build and are handled ONLY in the Tizen
 edge files (the portable core is untouched):
 
 1. **No console → dlog.** The service has no stdout; `Microsoft.Extensions.Logging`'s
-   `AddConsole()` crashes. `DlogLoggerProvider` routes logs to `Tizen.Log` instead
-   (`DeviceHost` wires it, never `AddConsole`). Tail with `dlogutil GOALFLOW`.
+   `AddConsole()` crashes. `DlogLogger.cs` routes logs to `Tizen.Log` instead
+   (`DeviceHost` wires it, never `AddConsole`). **View with `dlogutil GOALFLOW`**
+   (or `sdb dlog GOALFLOW:V *:S` to isolate). `Program` also emits dlog breadcrumbs
+   at Main / OnCreate / host-built / connecting, and wraps `OnCreate` + the connect
+   loop in try/catch that dlog-logs the exception — so a startup failure is never
+   silent. (If dlog looks empty, the app likely threw BEFORE logging — see #4.)
 2. **No environment variables.** A Tizen service is not launched with the shell
    environment, and its CWD is not the app dir — so `Environment.GetEnvironmentVariable`
    and a CWD-relative `.env` both fail (this is why `OPENROUTER_API_KEY` was null →
@@ -65,6 +69,21 @@ edge files (the portable core is untouched):
    bundles `data/` read-only under `Application.Current.DirectoryInfo.Resource`.
    `DeviceConfig.ResolveDataDir()` seeds a writable copy into the app `Data` dir on
    first run and points the store there.
+4. **Package versions MUST stay on the .NET 8 line.** Tizen 12 runs on .NET 8 and
+   ships its OWN `System.Text.Json` (a platform assembly loaded before app-local
+   ones). Wildcard versions (`*` / `1.*`) resolved to .NET 10-era packages —
+   `System.Text.Json 10.0.9`, `SemanticKernel 1.78` (which requires STJ 10.0.6) —
+   and the Tizen runtime refuses to load them (assembly version 10.0.0.0 vs the
+   platform's 8.0.0.0). **Pinned:** `Microsoft.SemanticKernel 1.43.0` (newest SK line
+   still on STJ 8.0.5; SK ≥ ~1.61 jumps to 10.x), `System.Text.Json 8.0.5`,
+   `Microsoft.Extensions.* 8.0.x`. STJ's assembly version is `8.0.0.0` for every
+   8.0.x, so this satisfies whatever 8.0.x the device ships. Do NOT reintroduce
+   wildcards or bump SK without checking its transitive STJ stays 8.0.x. SK 1.43
+   still gates a few APIs behind `SKEXP0001`/`SKEXP0010` (1.78 graduated them), so
+   the csproj `NoWarn`s those — Tizen-only; the core has no pragmas.
+   `AssemblyResolver.cs` additionally prefers app-local (bin) copies as a fallback,
+   but that only helps when the platform did not already load the assembly — the
+   version pin is the real fix.
 
 ## v2 invariants (do NOT regress)
 

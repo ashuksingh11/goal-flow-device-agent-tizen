@@ -26,15 +26,30 @@ public sealed class GoalFlowService : ServiceApplication
     {
         base.OnCreate();
 
-        // Env-free config (Tizen services aren't launched with the shell env) —
-        // reads a bundled goalflow.conf; see DeviceConfig.
-        var config = DeviceConfig.Load();
-        var dataDir = config.ResolveDataDir();
-        _host = DeviceHost.Build(config, dataDir);
+        // Log the lifecycle DIRECTLY via dlog (not the ILogger pipeline) so there
+        // is ALWAYS visible output under `dlogutil GOALFLOW`, even if host build
+        // throws (e.g. an assembly-load failure) before the logger logs anything.
+        Tizen.Log.Info(DlogLoggerProvider.Tag, "OnCreate: starting GoalFlow device service");
+        try
+        {
+            // Env-free config (Tizen services aren't launched with the shell env) —
+            // reads a bundled goalflow.conf; see DeviceConfig.
+            var config = DeviceConfig.Load();
+            var dataDir = config.ResolveDataDir();
+            _host = DeviceHost.Build(config, dataDir);
 
-        var wsUrl = config.Get("WS_URL", "ws://localhost:8000/ws");
-        _cts = new CancellationTokenSource();
-        _connectLoop = Task.Run(() => RunAsync(new Uri(wsUrl), _cts.Token));
+            var wsUrl = config.Get("WS_URL", "ws://localhost:8000/ws");
+            Tizen.Log.Info(DlogLoggerProvider.Tag, $"OnCreate: host built, connecting to {wsUrl}");
+            _cts = new CancellationTokenSource();
+            _connectLoop = Task.Run(() => RunAsync(new Uri(wsUrl), _cts.Token));
+        }
+        catch (Exception ex)
+        {
+            // An unhandled throw here would terminate the service silently (no
+            // GOALFLOW log line). Surface it to dlog so `dlogutil GOALFLOW` shows why.
+            Tizen.Log.Error(DlogLoggerProvider.Tag, $"OnCreate FAILED: {ex}");
+            throw;
+        }
     }
 
     /// <summary>
@@ -49,47 +64,59 @@ public sealed class GoalFlowService : ServiceApplication
         var loggerFactory = host.LoggerFactory;
         var log = loggerFactory.CreateLogger("Connect");
 
-        await using var ws = new WsClient(url, loggerFactory.CreateLogger<WsClient>());
-        Func<AgentEvent, Task> emit = evt => ws.SendAsync(evt, ct);
-        var trace = new Trace(loggerFactory.CreateLogger<Trace>(), emit);
-        var agent = host.CreateAgent(trace);
-
-        var capabilities = host.Capabilities.BuildCapabilitiesMessage(host.Kernel);
-        await ws.ConnectAsync(capabilities, ct);
-
-        ws.FrameReceived += (type, raw) =>
+        try
         {
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    switch (type)
-                    {
-                        case MessageTypes.Dispatch:
-                            await ws.SendAsync(await agent.RunAsync(ContractJson.Deserialize<Dispatch>(raw)), ct);
-                            break;
-                        case MessageTypes.Approval:
-                            await ws.SendAsync(await agent.ApplyApprovalAsync(ContractJson.Deserialize<Approval>(raw)), ct);
-                            break;
-                        case MessageTypes.Control:
-                            var (status, proposal) = await agent.HandleControlAsync(ContractJson.Deserialize<Control>(raw));
-                            await ws.SendAsync(status, ct);
-                            if (proposal is not null)
-                            {
-                                await ws.SendAsync(proposal, ct);
-                            }
-                            break;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    log.LogError(ex, "frame handling failed for {Type}", type);
-                }
-            }, ct);
-            return Task.CompletedTask;
-        };
+            await using var ws = new WsClient(url, loggerFactory.CreateLogger<WsClient>());
+            Func<AgentEvent, Task> emit = evt => ws.SendAsync(evt, ct);
+            var trace = new Trace(loggerFactory.CreateLogger<Trace>(), emit);
+            var agent = host.CreateAgent(trace);
 
-        await ws.RunReceiveLoopAsync(ct);
+            var capabilities = host.Capabilities.BuildCapabilitiesMessage(host.Kernel);
+            await ws.ConnectAsync(capabilities, ct);
+
+            ws.FrameReceived += (type, raw) =>
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        switch (type)
+                        {
+                            case MessageTypes.Dispatch:
+                                await ws.SendAsync(await agent.RunAsync(ContractJson.Deserialize<Dispatch>(raw)), ct);
+                                break;
+                            case MessageTypes.Approval:
+                                await ws.SendAsync(await agent.ApplyApprovalAsync(ContractJson.Deserialize<Approval>(raw)), ct);
+                                break;
+                            case MessageTypes.Control:
+                                var (status, proposal) = await agent.HandleControlAsync(ContractJson.Deserialize<Control>(raw));
+                                await ws.SendAsync(status, ct);
+                                if (proposal is not null)
+                                {
+                                    await ws.SendAsync(proposal, ct);
+                                }
+                                break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        log.LogError(ex, "frame handling failed for {Type}", type);
+                    }
+                }, ct);
+                return Task.CompletedTask;
+            };
+
+            await ws.RunReceiveLoopAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal shutdown (OnTerminate cancelled the token).
+        }
+        catch (Exception ex)
+        {
+            // Background-task exceptions are otherwise swallowed — surface to dlog.
+            Tizen.Log.Error(DlogLoggerProvider.Tag, $"connect loop FAILED: {ex}");
+        }
     }
 
     protected override void OnTerminate()
@@ -117,6 +144,10 @@ public sealed class GoalFlowService : ServiceApplication
 
     public static void Main(string[] args)
     {
+        // FIRST: prefer app-local assemblies for the ones Tizen also ships (a
+        // fallback to the csproj version pins). Must run before any SK type loads.
+        AssemblyResolver.Install();
+        Tizen.Log.Info(DlogLoggerProvider.Tag, "Main: launching GoalFlow device service");
         new GoalFlowService().Run(args);
     }
 }

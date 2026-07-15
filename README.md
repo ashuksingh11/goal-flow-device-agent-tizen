@@ -96,6 +96,16 @@ tizen install -n org.goalflow.deviceagent-1.0.0.tpk -t <device-name>
 The required package identity is in `tizen-manifest.xml`:
 `org.goalflow.deviceagent`.
 
+**Watch logs on the Hub:** `dlogutil GOALFLOW` (or `sdb dlog GOALFLOW:V *:S`).
+The service dlog-logs breadcrumbs at launch / OnCreate / connecting, and any
+startup exception, so an empty log means it crashed before those ran.
+
+**Package versions are pinned to the .NET 8 line** (`SemanticKernel 1.43.0`,
+`System.Text.Json 8.0.5`, `Microsoft.Extensions.* 8.0.x`). Tizen 12 runs on
+.NET 8 and ships its own `System.Text.Json`; wildcard versions pulled .NET 10-era
+packages that the Tizen runtime refuses to load. Do NOT reintroduce wildcards or
+bump SemanticKernel past the STJ-8.0.x line (see AGENTS.md for the details).
+
 ## Configuration
 
 | Key                    | Meaning                              | Default                        |
