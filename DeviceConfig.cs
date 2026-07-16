@@ -125,9 +125,15 @@ public sealed class DeviceConfig
 
     /// <summary>
     /// A human label for the UI's device picker: <c>DEVICE_NAME</c> (goalflow.conf / env),
-    /// else <c>user@machine</c>. Set DEVICE_NAME in goalflow.conf to something meaningful
-    /// per Hub ("Kitchen Hub") when several are on one cloud — the default is only as
-    /// distinguishing as the Tizen user/host happen to be.
+    /// else <c>Family Hub (shortid)</c>.
+    ///
+    /// DELIBERATELY NOT <c>user@machine</c> (what the Ubuntu agent uses): every Hub reports
+    /// the SAME Tizen user/host, so two units would show identical labels and the picker
+    /// would be useless. The short id comes from the UNIQUE device_id, so the label is
+    /// unique by construction — no platform APIs involved.
+    ///
+    /// Still set <c>DEVICE_NAME</c> in goalflow.conf per Hub ("Kitchen Hub") when several
+    /// share a cloud: "Family Hub (3f9c2a)" disambiguates but doesn't say WHICH Hub.
     /// </summary>
     public string ResolveDeviceName(string deviceId)
     {
@@ -135,21 +141,8 @@ public sealed class DeviceConfig
         {
             return configured.Trim();
         }
-        try
-        {
-            var user = Environment.UserName;
-            var machine = Environment.MachineName;
-            if (!string.IsNullOrWhiteSpace(user) && !string.IsNullOrWhiteSpace(machine))
-            {
-                return $"{user}@{machine}";
-            }
-        }
-        catch
-        {
-            // fall through to the id-derived default
-        }
         var suffix = deviceId.Length <= 6 ? deviceId : deviceId[..6];
-        return $"GoalFlow Hub {suffix}";
+        return $"Family Hub ({suffix})";
     }
 
     /// <summary>

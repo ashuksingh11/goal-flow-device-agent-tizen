@@ -32,7 +32,9 @@ The cloud is multi-session — a **session = this agent + N UIs**, keyed by `dev
 takes `DEVICE_ID` from `goalflow.conf`/env, else generates a UUID **persisted in the
 WRITABLE data dir** (`<data>/device_id`) — so the Hub keeps ONE identity across restarts
 with zero configuration. `DeviceConfig.ResolveDeviceName` takes `DEVICE_NAME`, else
-`user@machine`; **set `DEVICE_NAME` in `goalflow.conf`** ("Kitchen Hub") when several Hubs
+`Family Hub (<short-id>)` — NOT `user@machine` (every Hub reports the same Tizen user/host,
+so two units would show identical labels); the short id comes from the unique device_id.
+**Set `DEVICE_NAME` in `goalflow.conf`** ("Kitchen Hub") when several Hubs
 share a cloud — that label is what the UI's device picker shows. `Program.cs` resolves both
 in `OnCreate` (dlog-logged) and passes them to `WsClient`.
 
