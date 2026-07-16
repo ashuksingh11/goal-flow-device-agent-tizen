@@ -22,6 +22,8 @@ public sealed class GoalFlowService : ServiceApplication
     private DeviceHost? _host;
     private Task? _connectLoop;
     private UiChannel? _ui;
+    private string _deviceId = "";
+    private string _deviceName = "";
 
     protected override void OnCreate()
     {
@@ -38,6 +40,13 @@ public sealed class GoalFlowService : ServiceApplication
             var config = DeviceConfig.Load();
             var dataDir = config.ResolveDataDir();
             _host = DeviceHost.Build(config, dataDir);
+
+            // The cloud is MULTI-SESSION: it pairs this Hub with its UIs by device_id.
+            // Self-generated + persisted in the writable data dir, so this Hub keeps one
+            // identity across restarts with no configuration.
+            _deviceId = config.ResolveDeviceId(dataDir);
+            _deviceName = config.ResolveDeviceName(_deviceId);
+            Tizen.Log.Info(DlogLoggerProvider.Tag, $"OnCreate: device_id={_deviceId} device_name={_deviceName}");
 
             // TIZEN-ONLY: mirror progress to the on-Hub NUI UI (App Control launch +
             // public Message Port). Best-effort; failures never affect planning or the
@@ -73,7 +82,7 @@ public sealed class GoalFlowService : ServiceApplication
 
         try
         {
-            await using var ws = new WsClient(url, loggerFactory.CreateLogger<WsClient>());
+            await using var ws = new WsClient(url, loggerFactory.CreateLogger<WsClient>(), _deviceId, _deviceName);
             // Tee every streamed agent_event to the on-Hub UI, then send to the cloud.
             Func<AgentEvent, Task> emit = evt =>
             {

@@ -2,18 +2,39 @@
 
 Context for an AI/coding session in this repo. Read first.
 
-## Status: RE-PORTED TO v2 (2026-07-13) — Tizen edge of the current device brain
+## Status: v2 + MULTI-SESSION — in sync with ubuntu (last re-synced 2026-07-16)
 
-This is the **Tizen Family Hub** deployment of the GoalFlow device agent. As of
-2026-07-13 it has been **re-ported to the v2 Semantic-Kernel design** and is in
-sync with the source of truth, **`../goal-flow-device-agent-ubuntu`**. (It was
-previously frozen at the retired v1 harness/pipeline architecture.)
+This is the **Tizen Family Hub** deployment of the GoalFlow device agent. It runs the
+v2 Semantic-Kernel design and is **in sync** with the source of truth,
+**`../goal-flow-device-agent-ubuntu`** (core re-synced 2026-07-16 to pick up the
+multi-session `device_id`/`device_name` handshake).
 
 The port is deliberately thin: the **portable v2 core is byte-for-byte identical**
 to the Ubuntu build, and only the platform edges differ. Future re-syncs are a
 plain copy of the core + a `dotnet build` — NEVER overwrite the Tizen host files
 (`Program.cs`, `DeviceHost.cs`, `DeviceConfig.cs`, `DlogLogger.cs`, `AssemblyResolver.cs`,
-`UiChannel.cs`).
+`UiChannel.cs`). Verify a re-sync with:
+
+```bash
+UB=../goal-flow-device-agent-ubuntu/src/GoalFlow.Device
+for d in Agent Contracts Modules Transport; do diff -rq "$d" "$UB/$d"; done   # must print nothing
+```
+
+**A core change may need host wiring on BOTH sides.** Example: `device_id` landed in the
+core (`Contracts/Hello.cs`, `Transport/WsClient.cs`) but each host resolves it its own
+way — ubuntu in `ProgramHelpers`, Tizen in `DeviceConfig` (below). Copying the core alone
+would compile but never send an id.
+
+## Multi-session: this Hub's `device_id`
+
+The cloud is multi-session — a **session = this agent + N UIs**, keyed by `device_id`
+(see `../goal-flow-cloud-agent/CONTRACT.md` § "Sessions"). `DeviceConfig.ResolveDeviceId`
+takes `DEVICE_ID` from `goalflow.conf`/env, else generates a UUID **persisted in the
+WRITABLE data dir** (`<data>/device_id`) — so the Hub keeps ONE identity across restarts
+with zero configuration. `DeviceConfig.ResolveDeviceName` takes `DEVICE_NAME`, else
+`user@machine`; **set `DEVICE_NAME` in `goalflow.conf`** ("Kitchen Hub") when several Hubs
+share a cloud — that label is what the UI's device picker shows. `Program.cs` resolves both
+in `OnCreate` (dlog-logged) and passes them to `WsClient`.
 
 ## Layout
 

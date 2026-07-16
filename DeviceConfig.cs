@@ -84,6 +84,75 @@ public sealed class DeviceConfig
     }
 
     /// <summary>
+    /// Resolve the device_id — the cloud's PAIRING KEY (a session = this agent + N UIs).
+    /// <c>DEVICE_ID</c> (goalflow.conf / env) wins; otherwise a stable UUID persisted in
+    /// the WRITABLE data dir (<c>&lt;data&gt;/device_id</c>), generated once on first run
+    /// and reused for the life of the install — so this Hub keeps one identity across
+    /// restarts with no configuration. Same scheme as the Ubuntu agent (plain File I/O).
+    /// </summary>
+    public string ResolveDeviceId(string dataDir)
+    {
+        if (Get("DEVICE_ID") is { Length: > 0 } configured)
+        {
+            return configured.Trim();
+        }
+
+        var path = Path.Combine(dataDir, "device_id");
+        try
+        {
+            if (File.Exists(path))
+            {
+                var existing = File.ReadAllText(path).Trim();
+                if (existing.Length > 0)
+                {
+                    return existing;
+                }
+            }
+            if (!Directory.Exists(dataDir))
+            {
+                return Guid.NewGuid().ToString("N"); // non-persistent fallback
+            }
+            var generated = Guid.NewGuid().ToString("N");
+            File.WriteAllText(path, generated);
+            return generated;
+        }
+        catch
+        {
+            // Read-only/unavailable data dir: still unique, just not stable across runs.
+            return Guid.NewGuid().ToString("N");
+        }
+    }
+
+    /// <summary>
+    /// A human label for the UI's device picker: <c>DEVICE_NAME</c> (goalflow.conf / env),
+    /// else <c>user@machine</c>. Set DEVICE_NAME in goalflow.conf to something meaningful
+    /// per Hub ("Kitchen Hub") when several are on one cloud — the default is only as
+    /// distinguishing as the Tizen user/host happen to be.
+    /// </summary>
+    public string ResolveDeviceName(string deviceId)
+    {
+        if (Get("DEVICE_NAME") is { Length: > 0 } configured)
+        {
+            return configured.Trim();
+        }
+        try
+        {
+            var user = Environment.UserName;
+            var machine = Environment.MachineName;
+            if (!string.IsNullOrWhiteSpace(user) && !string.IsNullOrWhiteSpace(machine))
+            {
+                return $"{user}@{machine}";
+            }
+        }
+        catch
+        {
+            // fall through to the id-derived default
+        }
+        var suffix = deviceId.Length <= 6 ? deviceId : deviceId[..6];
+        return $"GoalFlow Hub {suffix}";
+    }
+
+    /// <summary>
     /// The READ-ONLY bundled <c>data/</c> dir. Tizen packaging drops our
     /// <c>Content</c> (<c>data/**</c>) next to the app assemblies under <c>bin</c>,
     /// which is <see cref="AppContext.BaseDirectory"/> at runtime and readable by

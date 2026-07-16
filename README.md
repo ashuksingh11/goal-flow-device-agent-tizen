@@ -114,6 +114,8 @@ bump SemanticKernel past the STJ-8.0.x line (see AGENTS.md for the details).
 | `OPENROUTER_BASE_URL`  | OpenAI-compatible base URL           | `https://openrouter.ai/api/v1`  |
 | `OPENROUTER_MODEL`     | Model id                             | `openai/gpt-oss-120b`           |
 | `WS_URL`               | Cloud hub WebSocket endpoint         | `ws://localhost:8000/ws`        |
+| `DEVICE_ID`            | Pairing key on the multi-session cloud | self-generated UUID, persisted in the data dir |
+| `DEVICE_NAME`          | Label shown in the UI's device picker | `user@machine`                 |
 | `GOALFLOW_DATA_DIR`    | Mock world directory                 | seeded writable copy (see below)|
 | `GOALFLOW_DATE`        | `SimulatedClock` start date (ISO)    | real today                      |
 | `LOG_LEVEL`            | Log level                            | `Information`                   |

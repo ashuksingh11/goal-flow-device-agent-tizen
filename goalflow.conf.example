@@ -20,6 +20,16 @@ OPENROUTER_MODEL=openai/gpt-oss-120b
 # Cloud hub WebSocket endpoint the device dials out to.
 WS_URL=ws://localhost:8000/ws
 
+# Optional — this Hub's identity on the (multi-session) cloud. A session is
+# THIS agent + the UIs watching it, keyed by device_id. Leave DEVICE_ID unset:
+# a UUID is generated once and persisted in the writable data dir, so the Hub
+# keeps one identity across restarts with no configuration.
+# DEVICE_ID=kitchen-hub
+#
+# DEVICE_NAME is the label the UI's device picker shows. Default: user@machine.
+# SET THIS when several Hubs share one cloud — it's how a user tells them apart.
+# DEVICE_NAME=Kitchen Hub
+
 # Optional — start the simulated clock at a fixed date (ISO). Default: real today.
 # GOALFLOW_DATE=2026-07-14
 
