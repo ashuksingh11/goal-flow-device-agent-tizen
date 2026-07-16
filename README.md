@@ -122,14 +122,18 @@ bump SemanticKernel past the STJ-8.0.x line (see AGENTS.md for the details).
 `ServiceApplication` is not launched with the shell environment, so `DeviceConfig`
 reads a bundled `goalflow.conf` (plain `KEY=VALUE`) — copy `goalflow.conf.example`
 → `goalflow.conf` and fill it in (it is gitignored; it holds the API key). It is
-packaged into the `.tpk` resource dir; a writable override may also be dropped in
-the app Data dir. **Off-device** (desktop / Ubuntu-parity), environment variables
-take precedence, so the same build still works from a shell.
+bundled as MSBuild `Content`, so packaging drops it next to the app assemblies
+under `<app>/bin` (= `AppContext.BaseDirectory`, readable) — `DeviceConfig` reads
+it from there, with the Tizen resource dir kept only as a fallback. A writable
+override may also be dropped in the app Data dir. **Off-device** (desktop /
+Ubuntu-parity), environment variables take precedence, so the same build still
+works from a shell.
 
 Two more Tizen platform edges (handled automatically):
 
 - **Logging goes to dlog**, not the console (a headless service has no stdout).
   Tail it on the Hub with `dlogutil GOALFLOW`.
 - **The mock world is seeded into a writable dir.** The `.tpk` bundles `data/`
-  read-only under the resource dir, but `MockWorldStore` mutates it, so on first
-  run a writable copy is seeded into the app Data dir.
+  read-only next to the app assemblies (`<app>/bin` = `AppContext.BaseDirectory`),
+  but `MockWorldStore` mutates it, so on first run a writable copy is seeded into
+  the app Data root and the store points there.

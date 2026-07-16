@@ -65,10 +65,17 @@ edge files (the portable core is untouched):
    throw). Config comes from `DeviceConfig` reading a bundled `goalflow.conf`
    (copy `goalflow.conf.example` → `goalflow.conf`, gitignored, holds the API key).
    Env vars still win off-device (desktop parity).
-3. **Read-only resource dir.** `MockWorldStore` mutates `data/*.json`, but the .tpk
-   bundles `data/` read-only under `Application.Current.DirectoryInfo.Resource`.
-   `DeviceConfig.ResolveDataDir()` seeds a writable copy into the app `Data` dir on
-   first run and points the store there.
+3. **Read-only resource dir + folder mapping (bin, not res).** `MockWorldStore`
+   mutates `data/*.json`, but the bundled `data/` ships read-only.
+   `DeviceConfig.ResolveDataDir()` seeds a writable copy into the app `Data` ROOT on
+   first run and points the store there. **CRITICAL:** the csproj bundles `data/**`
+   and `goalflow.conf` as MSBuild `Content`, so Tizen packaging drops them next to
+   the app assemblies under **`<app>/bin` == `AppContext.BaseDirectory`** (readable),
+   NOT under `Application.Current.DirectoryInfo.Resource` (`<app>/res`, which stays
+   empty). So `DeviceConfig` reads the bundled `goalflow.conf` and the seed-source
+   `data/` from `AppContext.BaseDirectory` first (with `Resource` kept only as a
+   fallback), and seeds the writable copy into the `Data` root (not a `Data/data`
+   sub-dir). Don't assume `res` — `bin` is where `Content` lands and is app-readable.
 4. **Package versions MUST stay on the .NET 8 line.** Tizen 12 runs on .NET 8 and
    ships its OWN `System.Text.Json` (a platform assembly loaded before app-local
    ones). Wildcard versions (`*` / `1.*`) resolved to .NET 10-era packages —

@@ -5,14 +5,25 @@ namespace GoalFlow.Device;
 /// variables. A Tizen <c>ServiceApplication</c> is not launched with the shell
 /// environment (so <c>OPENROUTER_API_KEY</c> etc. come back null) and its working
 /// directory is not the app directory (so a CWD-relative <c>.env</c> is never
-/// found). Instead, config is read from a <c>goalflow.conf</c> (KEY=VALUE) file
-/// bundled in the app's resource dir, with a writable Data-dir override, and an
+/// found). Config is read from a <c>goalflow.conf</c> (KEY=VALUE) file
+/// bundled with the app, with a writable Data-dir override, and an
 /// environment-variable fallback so the SAME code still works in a desktop /
 /// Ubuntu-parity run.
 ///
-/// Lookup precedence per key: environment variable → <c>Data/goalflow.conf</c>
-/// (writable, on-device drop-in) → <c>Resource/goalflow.conf</c> (bundled) →
-/// CWD <c>goalflow.conf</c>/<c>.env</c> (desktop) → null.
+/// FOLDER MAPPING (why <see cref="AppContext.BaseDirectory"/>, not
+/// <c>Resource</c>): the csproj bundles <c>goalflow.conf</c> and <c>data/**</c>
+/// as MSBuild <c>Content</c>, which Tizen packaging drops next to the app
+/// assemblies under <c>bin</c> — that path is <see cref="AppContext.BaseDirectory"/>
+/// at runtime and IS readable by the app (the managed DLLs load from it). It is
+/// NOT <c>DirectoryInfo.Resource</c> (<c>res/</c>), which stays empty unless a
+/// build explicitly packages into <c>res/</c>. So bundled files are read from
+/// <c>bin</c> first, with <c>res</c> kept as a fallback.
+///
+/// Lookup precedence per key: environment variable → bundled
+/// <c>bin/goalflow.conf</c> (<see cref="AppContext.BaseDirectory"/>) → bundled
+/// <c>Resource/goalflow.conf</c> → CWD <c>goalflow.conf</c>/<c>.env</c> (desktop)
+/// → writable <c>Data/goalflow.conf</c> (on-device drop-in, wins over bundled)
+/// → null.
 /// </summary>
 public sealed class DeviceConfig
 {
@@ -42,15 +53,17 @@ public sealed class DeviceConfig
 
     public string GetRequired(string key)
         => Get(key) ?? throw new InvalidOperationException(
-            $"{key} is required. Set it in goalflow.conf (in the app resource or data dir) " +
-            "or, off-device, in the environment.");
+            $"{key} is required. Set it in goalflow.conf (bundled next to the app under " +
+            "bin, or dropped in the app Data dir) or, off-device, in the environment.");
 
     /// <summary>
     /// Resolve a WRITABLE mock-world directory. <see cref="Modules.Capabilities.MockWorldStore"/>
-    /// mutates <c>shopping_list.json</c> etc., but the .tpk bundles <c>data/</c>
-    /// read-only under <c>Resource</c> — writing there fails. Seed a writable copy
-    /// under the app <c>Data</c> dir on first run and use that. Off-Tizen (no app
-    /// framework) this is just <c>./data</c>.
+    /// mutates <c>shopping_list.json</c> etc., but the bundled <c>data/</c> ships
+    /// read-only next to the app assemblies (under <c>bin</c> ==
+    /// <see cref="AppContext.BaseDirectory"/>) — writing there fails. Seed a
+    /// writable copy into the app's private <c>Data</c> ROOT on first run and use
+    /// that (NOT a <c>Data/data</c> sub-dir). Off-Tizen (no app framework) this is
+    /// just <c>./data</c>.
     /// </summary>
     public string ResolveDataDir()
     {
@@ -59,23 +72,59 @@ public sealed class DeviceConfig
             return configured;
         }
 
-        var writable = AppPath(static d => d.Data, "data");
+        // The app's private writable data ROOT (e.g. <app>/data), NOT <app>/data/data.
+        var writable = AppDataRoot();
         if (writable is null)
         {
-            return "data"; // not running under the Tizen app framework
+            return "data"; // not running under the Tizen app framework (desktop/Ubuntu parity)
         }
 
-        // Seed the writable copy from the first bundled source we can find.
-        var source = AppPath(static d => d.Resource, "data")
-            ?? Path.Combine(Directory.GetCurrentDirectory(), "data");
-        SeedIfEmpty(source, writable);
+        SeedIfEmpty(BundledDataDir(), writable);
         return writable;
     }
 
+    /// <summary>
+    /// The READ-ONLY bundled <c>data/</c> dir. Tizen packaging drops our
+    /// <c>Content</c> (<c>data/**</c>) next to the app assemblies under <c>bin</c>,
+    /// which is <see cref="AppContext.BaseDirectory"/> at runtime and readable by
+    /// the app; prefer it. Fall back to the Tizen resource dir (if a build packages
+    /// <c>data/</c> there) and finally the CWD (desktop).
+    /// </summary>
+    private static string BundledDataDir()
+    {
+        var baseDir = Path.Combine(AppContext.BaseDirectory, "data");
+        if (HasJson(baseDir))
+        {
+            return baseDir;
+        }
+
+        if (AppPath(static d => d.Resource, "data") is { } resource && HasJson(resource))
+        {
+            return resource;
+        }
+
+        return Path.Combine(Directory.GetCurrentDirectory(), "data");
+    }
+
+    /// <summary>The app's private WRITABLE data root (<c>&lt;app&gt;/data</c>), or null off-Tizen.</summary>
+    private static string? AppDataRoot()
+    {
+        try
+        {
+            return Tizen.Applications.Application.Current?.DirectoryInfo?.Data;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool HasJson(string dir)
+        => Directory.Exists(dir) && Directory.EnumerateFiles(dir, "*.json").Any();
+
     private static void SeedIfEmpty(string source, string target)
     {
-        var hasTarget = Directory.Exists(target) && Directory.EnumerateFiles(target, "*.json").Any();
-        if (hasTarget || !Directory.Exists(source))
+        if (HasJson(target) || !Directory.Exists(source))
         {
             return;
         }
@@ -89,19 +138,29 @@ public sealed class DeviceConfig
 
     private static IEnumerable<string> ConfigCandidatePaths()
     {
+        // Loaded in order; later files OVERRIDE earlier ones (LoadFile overwrites),
+        // so bundled sources come first and the writable on-device drop-in comes last.
+
+        // Bundled: Content lands next to the app assemblies under <app>/bin ==
+        // AppContext.BaseDirectory (readable). This is where our goalflow.conf goes.
+        yield return Path.Combine(AppContext.BaseDirectory, "goalflow.conf");
+
+        // Fallback: the Tizen resource dir, in case a build packages it to <app>/res.
         if (AppPath(static d => d.Resource, "goalflow.conf") is { } resource)
         {
             yield return resource;
         }
 
+        // Desktop / Ubuntu-parity run.
+        var cwd = Directory.GetCurrentDirectory();
+        yield return Path.Combine(cwd, "goalflow.conf");
+        yield return Path.Combine(cwd, ".env");
+
+        // On-device WRITABLE drop-in (last → overrides the bundled copy).
         if (AppPath(static d => d.Data, "goalflow.conf") is { } data)
         {
             yield return data;
         }
-
-        var cwd = Directory.GetCurrentDirectory();
-        yield return Path.Combine(cwd, "goalflow.conf");
-        yield return Path.Combine(cwd, ".env");
     }
 
     /// <summary>
