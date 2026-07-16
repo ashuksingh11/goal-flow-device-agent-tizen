@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns="http://tizen.org/ns/packages" api-version="11" package="org.goalflow.deviceagent" version="1.0.0">
+<manifest xmlns="http://tizen.org/ns/packages" api-version="10" package="org.goalflow.deviceagent" version="1.0.0">
   <profile name="common" />
   <service-application appid="org.goalflow.deviceagent" exec="GoalFlow.Device.Tizen.dll" type="dotnet"
                        multiple="false" taskmanage="false" nodisplay="true">
@@ -7,6 +7,8 @@
   </service-application>
   <privileges>
     <privilege>http://tizen.org/privilege/internet</privilege>
+    <!-- Launch the on-Hub NUI progress UI (org.goalflow.tizenui) via App Control. -->
+    <privilege>http://tizen.org/privilege/appmanager.launch</privilege>
     <!-- Needed by future real adapters if they persist synced agent state or cache local recipe/device data. -->
     <privilege>http://tizen.org/privilege/mediastorage</privilege>
     <!-- Needed by future real reminder/alert actuators. -->

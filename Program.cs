@@ -21,6 +21,7 @@ public sealed class GoalFlowService : ServiceApplication
     private CancellationTokenSource? _cts;
     private DeviceHost? _host;
     private Task? _connectLoop;
+    private UiChannel? _ui;
 
     protected override void OnCreate()
     {
@@ -37,6 +38,12 @@ public sealed class GoalFlowService : ServiceApplication
             var config = DeviceConfig.Load();
             var dataDir = config.ResolveDataDir();
             _host = DeviceHost.Build(config, dataDir);
+
+            // TIZEN-ONLY: mirror progress to the on-Hub NUI UI (App Control launch +
+            // public Message Port). Best-effort; failures never affect planning or the
+            // cloud path. Started here so its control port is listening before dispatch.
+            _ui = new UiChannel();
+            _ui.Start();
 
             var wsUrl = config.Get("WS_URL", "ws://localhost:8000/ws");
             Tizen.Log.Info(DlogLoggerProvider.Tag, $"OnCreate: host built, connecting to {wsUrl}");
@@ -67,7 +74,12 @@ public sealed class GoalFlowService : ServiceApplication
         try
         {
             await using var ws = new WsClient(url, loggerFactory.CreateLogger<WsClient>());
-            Func<AgentEvent, Task> emit = evt => ws.SendAsync(evt, ct);
+            // Tee every streamed agent_event to the on-Hub UI, then send to the cloud.
+            Func<AgentEvent, Task> emit = evt =>
+            {
+                _ui?.Forward(evt);
+                return ws.SendAsync(evt, ct);
+            };
             var trace = new Trace(loggerFactory.CreateLogger<Trace>(), emit);
             var agent = host.CreateAgent(trace);
 
@@ -83,16 +95,25 @@ public sealed class GoalFlowService : ServiceApplication
                         switch (type)
                         {
                             case MessageTypes.Dispatch:
-                                await ws.SendAsync(await agent.RunAsync(ContractJson.Deserialize<Dispatch>(raw)), ct);
+                                var dispatch = ContractJson.Deserialize<Dispatch>(raw);
+                                // Goal activated: launch + reset the UI, then stream to it.
+                                _ui?.OnGoalActivated(dispatch.GoalId, dispatch.Objective);
+                                var planReady = await agent.RunAsync(dispatch);
+                                _ui?.Forward(planReady);
+                                await ws.SendAsync(planReady, ct);
                                 break;
                             case MessageTypes.Approval:
-                                await ws.SendAsync(await agent.ApplyApprovalAsync(ContractJson.Deserialize<Approval>(raw)), ct);
+                                var approvalStatus = await agent.ApplyApprovalAsync(ContractJson.Deserialize<Approval>(raw));
+                                _ui?.Forward(approvalStatus);
+                                await ws.SendAsync(approvalStatus, ct);
                                 break;
                             case MessageTypes.Control:
                                 var (status, proposal) = await agent.HandleControlAsync(ContractJson.Deserialize<Control>(raw));
+                                _ui?.Forward(status);
                                 await ws.SendAsync(status, ct);
                                 if (proposal is not null)
                                 {
+                                    _ui?.Forward(proposal);
                                     await ws.SendAsync(proposal, ct);
                                 }
                                 break;
@@ -136,6 +157,7 @@ public sealed class GoalFlowService : ServiceApplication
         }
         finally
         {
+            _ui?.Dispose();
             _cts?.Dispose();
         }
 

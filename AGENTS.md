@@ -11,7 +11,9 @@ previously frozen at the retired v1 harness/pipeline architecture.)
 
 The port is deliberately thin: the **portable v2 core is byte-for-byte identical**
 to the Ubuntu build, and only the platform edges differ. Future re-syncs are a
-plain copy of the core + a `dotnet build`.
+plain copy of the core + a `dotnet build` — NEVER overwrite the Tizen host files
+(`Program.cs`, `DeviceHost.cs`, `DeviceConfig.cs`, `DlogLogger.cs`, `AssemblyResolver.cs`,
+`UiChannel.cs`).
 
 ## Layout
 
@@ -31,7 +33,15 @@ plain copy of the core + a `dotnet build`.
 - **Tizen platform edge (the ONLY device-specific code):**
   - `Program.cs` — `GoalFlowService : ServiceApplication`. `OnCreate` builds the host
     and starts the connect/receive loop on a background task (OnCreate must return);
-    `OnTerminate` cancels + disposes.
+    `OnTerminate` cancels + disposes. Also constructs the `UiChannel` and tees each
+    outbound frame to it (a few one-line `_ui?.Forward(...)` calls + the emit wrap) —
+    these are the ONLY additions to the frame path and touch NO core file.
+  - `UiChannel.cs` — **Tizen host file, NEVER overwrite on re-sync.** Launches the on-Hub
+    NUI UI (`org.goalflow.tizenui`, repo `../goal-flow-agent-tizen-ui`) via App Control on
+    goal activation and forwards progress frames to it over a PUBLIC Message Port (ports
+    `goalflow.agent.control` in / `goalflow.ui.frames` out; buffer + `ui_ready` handshake).
+    Serializes via `ContractJson.Serialize` (a call). Best-effort, non-throwing — a UI
+    hiccup never affects planning or the cloud path.
   - `DeviceHost.cs` — the DI container + kernel builder. Mirrors the Ubuntu `Program.cs`
     wiring, but reads config via `DeviceConfig` (NOT env vars) and logs via dlog (NOT console).
   - `DeviceConfig.cs` — **env-free config** (see Tizen platform notes). Reads a bundled
