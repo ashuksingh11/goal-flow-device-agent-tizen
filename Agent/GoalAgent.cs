@@ -1,6 +1,6 @@
 using GoalFlow.Device.Contracts;
-using GoalFlow.Device.Modules.Capabilities;
-using GoalFlow.Device.Modules.Steering;
+using GoalFlow.Device.Harness;
+using GoalFlow.Device.Products.FamilyHub;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
@@ -9,6 +9,7 @@ using Microsoft.SemanticKernel.Connectors.OpenAI;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Collections.Concurrent;
 
 namespace GoalFlow.Device.Agent;
 
@@ -44,13 +45,37 @@ public sealed class GoalAgent
     private readonly SafetyFilter _safety;
     private readonly ApprovalCoordinator _approvals;
     private readonly MonitorAdapt _monitor;
+    private readonly CapabilityManager _capabilities;
+    private readonly PrecheckEngine _prechecks;
     private readonly IClock _clock;
     private readonly ILogger<GoalAgent> _logger;
-    private readonly Dictionary<string, ActiveGoalContext> _activeGoals = new(StringComparer.Ordinal);
+    private readonly TaskManager _tasks;
 
     /// <summary>Plan patches awaiting approval, keyed by proposal id → (goalId, patch).
-    /// Registered when a daily adaptation is proposed; applied in ApplyApproval.</summary>
-    private readonly Dictionary<string, (string GoalId, PlanPatch Patch)> _pendingPatches = new(StringComparer.Ordinal);
+    /// Registered when a daily adaptation is proposed; applied in ApplyApproval.
+    /// CONCURRENT: two goals can be adapting at once, and Program dispatches every
+    /// frame on its own Task.Run — a plain Dictionary tears under that.</summary>
+    private readonly ConcurrentDictionary<string, (string GoalId, PlanPatch Patch)> _pendingPatches = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Only ONE goal may be in the planning passes at a time.
+    ///
+    /// <para>
+    /// Not a correctness fix — the state is per-goal now — but an honesty one. Three
+    /// concurrent plans mean three simultaneous grounding tool-loops and composes:
+    /// triple the token burn on a key that already 402s on low credit, and a
+    /// "watch it think" stream interleaved from three goals that reads as noise.
+    /// Serialising planning makes a queued goal show up on the board as WAITING —
+    /// a visible state a person can understand — instead of a hidden stall.
+    /// </para>
+    ///
+    /// <para>
+    /// Approvals, control ticks and adaptations do NOT take this: they are short,
+    /// and blocking them behind someone else's 60-second plan would be the very
+    /// stall this avoids.
+    /// </para>
+    /// </summary>
+    private readonly SemaphoreSlim _planningSlot = new(1, 1);
 
     /// <summary>Marker module/function on an adaptation ProposalItem meaning "apply
     /// the pending plan patch" — intercepted in ApplyApproval, never kernel-invoked.</summary>
@@ -64,6 +89,9 @@ public sealed class GoalAgent
         SafetyFilter safety,
         ApprovalCoordinator approvals,
         MonitorAdapt monitor,
+        CapabilityManager capabilities,
+        TaskManager tasks,
+        PrecheckEngine prechecks,
         IClock clock,
         ILogger<GoalAgent> logger)
     {
@@ -73,6 +101,9 @@ public sealed class GoalAgent
         _safety = safety;
         _approvals = approvals;
         _monitor = monitor;
+        _capabilities = capabilities;
+        _tasks = tasks;
+        _prechecks = prechecks;
         _clock = clock;
         _logger = logger;
     }
@@ -81,9 +112,9 @@ public sealed class GoalAgent
     /// Builds the device kernel:
     ///   1. OpenRouter chat completion (OpenAI-compatible connector; model
     ///      <see cref="AgentSettings.ModelId"/>, endpoint <see cref="AgentSettings.BaseUrl"/>).
-    ///   2. Capability plugins from DI, each under its advertised module name:
-    ///      Inventory, Calendar, Recipes, ShoppingList, Reminders, Guests, Appliance,
-    ///      FamilyProfiles, Budget, Notify.
+    ///   2. Capability plugins from the CapabilityManager's descriptors — i.e.
+    ///      whatever the product pack registered, in ITS order (which is the
+    ///      order the model sees its tools in). This method names no plugin type.
     ///   3. The <see cref="SafetyFilter"/> as an <see cref="IFunctionInvocationFilter"/>
     ///      service — every auto-invoked function passes through it.
     /// </summary>
@@ -98,34 +129,48 @@ public sealed class GoalAgent
 
         builder.Services.AddSingleton(services.GetRequiredService<ILoggerFactory>());
         builder.Services.AddSingleton<IFunctionInvocationFilter>(services.GetRequiredService<SafetyFilter>());
-        builder.Services.AddSingleton(services.GetRequiredService<MockWorldStore>());
+        builder.Services.AddSingleton(services.GetRequiredService<IProductApiAdapter>());
 
-        builder.Plugins.AddFromObject(services.GetRequiredService<InventoryPlugin>(), "Inventory");
-        builder.Plugins.AddFromObject(services.GetRequiredService<CalendarPlugin>(), "Calendar");
-        builder.Plugins.AddFromObject(services.GetRequiredService<RecipePlugin>(), "Recipes");
-        builder.Plugins.AddFromObject(services.GetRequiredService<ShoppingListPlugin>(), "ShoppingList");
-        builder.Plugins.AddFromObject(services.GetRequiredService<ReminderPlugin>(), "Reminders");
-        builder.Plugins.AddFromObject(services.GetRequiredService<GuestsPlugin>(), "Guests");
-        builder.Plugins.AddFromObject(services.GetRequiredService<ApplianceControlPlugin>(), "Appliance");
-        builder.Plugins.AddFromObject(services.GetRequiredService<FamilyProfilesPlugin>(), "FamilyProfiles");
-        builder.Plugins.AddFromObject(services.GetRequiredService<BudgetPlugin>(), "Budget");
-        builder.Plugins.AddFromObject(services.GetRequiredService<NotifyPlugin>(), "Notify");
+        foreach (var capability in services.GetRequiredService<CapabilityManager>().Descriptors)
+        {
+            builder.Plugins.AddFromObject(capability.Instance, capability.Name);
+        }
 
         return builder.Build();
     }
 
     /// <summary>
     /// Runs one dispatch to a plan, STREAMING agent_events throughout:
-    ///   phase(grounding)  → Grounding.AssembleAsync; SafetyFilter.SetPolicy(constraints.hard)
+    ///   phase(grounding)  → Grounding.AssembleAsync; SafetyFilter.BeginGoal(goal, constraints.hard)
     ///   phase(planning)   → compose the final JSON plan without tools;
     ///                       thinking/tool_call/tool_result/plan_progress events still flow
     ///   phase(checking)   → collect SafetyFilter verdict + freeze side-effects into
     ///                       tiered proposals via ApprovalCoordinator
     ///   phase(awaiting_approval) → return the plan_ready frame.
     /// </summary>
-    public Task<PlanReady> RunAsync(Dispatch dispatch, CancellationToken ct = default)
+    public async Task<PlanReady> RunAsync(Dispatch dispatch, CancellationToken ct = default)
     {
-        return RunCoreAsync(dispatch, ct);
+        // Planning is serialised (see _planningSlot). If someone else holds the slot
+        // this goal is QUEUED, and it says so rather than going quiet: the board
+        // shows Waiting, which is a state a person can read, instead of a card that
+        // sits there doing nothing for a minute.
+        if (!await _planningSlot.WaitAsync(0, ct))
+        {
+            using var queuedScope = _trace.BeginGoalScope(dispatch.GoalId, dispatch.CorrelationId);
+            _logger.LogInformation("plan_queued {GoalId} — another goal is planning", dispatch.GoalId);
+            await _trace.PhaseAsync(Phases.Queued);
+            await _trace.ThinkingAsync("Another goal is planning right now — I'll start on this one next.");
+            await _planningSlot.WaitAsync(ct);
+        }
+
+        try
+        {
+            return await RunCoreAsync(dispatch, ct);
+        }
+        finally
+        {
+            _planningSlot.Release();
+        }
     }
 
     /// <summary>
@@ -147,6 +192,276 @@ public sealed class GoalAgent
         => HandleControlCoreAsync(control, ct);
 
     private const int MaxComposeAttempts = 3;
+
+    /// <summary>
+    /// How long ONE provider call may take before it is treated as a hang.
+    ///
+    /// <para>
+    /// Generous on purpose — a healthy call to this model answers in seconds, so these
+    /// are not latency targets. They are the line past which "slow" becomes "never":
+    /// the alternative is what shipped before them, a goal wedged for four hours while
+    /// the board reported progress. Streaming gets more room because it runs the tool
+    /// loop and reasons aloud. See <see cref="Deadline"/>.
+    /// </para>
+    /// </summary>
+    private static readonly TimeSpan LlmCallBudget = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan StreamingCallBudget = TimeSpan.FromSeconds(150);
+
+    /// <summary>Id of the one task a goal falls back to when decomposition is unavailable.</summary>
+    private const string SingleTaskId = "t1";
+
+    /// <summary>
+    /// THE FALL-BACK: one task for the whole goal — exactly the v2 shape. Used
+    /// when decomposition fails or the model returns nothing usable. The goal
+    /// still plans and still runs; the board just shows one coarse step instead of
+    /// several. A decomposition failure must never cost the user their goal.
+    /// </summary>
+    private static IReadOnlyList<TaskRecord> SynthesizeTasks(Dispatch dispatch)
+        => [new TaskRecord { TaskId = SingleTaskId, GoalId = dispatch.GoalId, Title = dispatch.Objective }];
+
+    /// <summary>
+    /// The goal can't be planned yet: the world isn't ready. It WAITS — an empty
+    /// plan with the reason and a `waiting` status — rather than failing.
+    ///
+    /// <para>
+    /// The distinction is the component's whole point, and it is a distinction the
+    /// user feels. "Blocked by safety" means never. "Waiting for approval" means
+    /// the user must act. "Waiting on a precheck" means something in the house is
+    /// unplugged: nobody did anything wrong, and it will resume by itself. Saying
+    /// which one is why the remediation text exists.
+    /// </para>
+    /// </summary>
+    private PlanReady BuildPrecheckBlockedPlan(Dispatch dispatch, PrecheckReport precheck)
+    {
+        _logger.LogInformation("plan_precheck_blocked {GoalId}: {Remediation}", dispatch.GoalId, precheck.Remediation);
+        return new PlanReady
+        {
+            GoalId = dispatch.GoalId,
+            CorrelationId = dispatch.CorrelationId,
+            // Not "blocked": nothing is wrong with the goal, and it should be
+            // retried when the world recovers.
+            TaskStatus = TaskStatuses.Monitoring,
+            Payload = new PlanReadyPayload
+            {
+                Plan = [],
+                Proposals = [],
+                Safety = new SafetyVerdict { Gate = SafetyGates.Passed, Violations = [] },
+                Precheck = ToPrecheckVerdict(precheck),
+                Impact = [],
+                Explanation = $"I can't start this yet — {precheck.Remediation}. I'll pick it up once that's sorted."
+            }
+        };
+    }
+
+    /// <summary>The wire shape of a precheck report (plan_ready.payload.precheck).</summary>
+    private static PrecheckVerdict ToPrecheckVerdict(PrecheckReport report)
+        => new()
+        {
+            Ok = report.Ok,
+            Results = report.Results
+                .Select(r => new PrecheckResultDto
+                {
+                    Id = r.Id,
+                    Status = r.Status.ToString().ToLowerInvariant(),
+                    Detail = r.Detail
+                })
+                .ToArray()
+        };
+
+    /// <summary>
+    /// Moves every task currently in <paramref name="from"/> to <paramref name="to"/>.
+    ///
+    /// <para>
+    /// The compose plans the whole goal at once, so its tasks move as a cohort
+    /// rather than one at a time. Filtering on the CURRENT state matters: a task
+    /// that already failed or was cancelled must not be dragged forward, and the
+    /// ledger would refuse the illegal move anyway — this just doesn't ask.
+    /// </para>
+    /// </summary>
+    private async Task AdvanceTasksAsync(string goalId, TaskState from, TaskState to)
+    {
+        var goal = _tasks.GetGoal(goalId);
+        if (goal is null)
+        {
+            return;
+        }
+
+        foreach (var task in goal.Tasks.Where(t => t.State == from).ToArray())
+        {
+            await _tasks.TransitionAsync(goalId, task.TaskId, to);
+        }
+    }
+
+    /// <summary>
+    /// Completes a goal's monitoring tasks once its time window has closed.
+    ///
+    /// <para>
+    /// Without this a goal monitors forever: the board would show a finished meal
+    /// week stuck at "in progress" all year. The end condition is the contract's
+    /// own <c>time_window.end</c> read against the GENERIC clock — not a guess, and
+    /// not the agent deciding for itself that it is finished.
+    /// </para>
+    ///
+    /// <para>Returns true when this call is what completed it.</para>
+    /// </summary>
+    private async Task<bool> CompleteIfWindowPassedAsync(GoalRecord goal, CancellationToken ct)
+    {
+        if (!DateOnly.TryParse(goal.Dispatch.TimeWindow.End, out var end) || _clock.Today <= end)
+        {
+            return false;
+        }
+
+        var monitoring = goal.Tasks.Where(t => t.State == TaskState.Monitoring).ToArray();
+        if (monitoring.Length == 0)
+        {
+            return false;
+        }
+
+        foreach (var task in monitoring)
+        {
+            await _tasks.TransitionAsync(goal.Dispatch.GoalId, task.TaskId, TaskState.Completed);
+        }
+
+        _logger.LogInformation("goal_complete {GoalId} window_end={End} progress={Progress}%",
+            goal.Dispatch.GoalId, goal.Dispatch.TimeWindow.End, goal.ProgressPercent);
+        return true;
+    }
+
+    /// <summary>
+    /// The one-line progress summary — what Agent Board will render as a
+    /// percentage and a next step. Derived from the ledger, never from the clock.
+    /// </summary>
+    private static string ProgressNote(GoalRecord? goal)
+        => goal is null || goal.Tasks.Count <= 1
+            ? ""
+            : $" Goal {goal.ProgressPercent}% ({goal.WorkDone}/{goal.Tasks.Count} steps done).";
+
+    /// <summary>
+    /// ALTITUDE ONE of the planner: what are the pieces of this goal?
+    ///
+    /// <para>
+    /// A JSON-mode call with NO tools, over the capabilities the device actually
+    /// advertises, asking only for structure — titles and dependencies — never
+    /// world facts. Grounding is altitude two's job (that pass has the tools);
+    /// asking a toolless model about the fridge would just invite invention.
+    /// </para>
+    ///
+    /// <para>
+    /// The result is a suggestion: <see cref="TaskDag.Sanitize"/> repairs it into
+    /// something executable. FAIL-SOFT everywhere — any failure returns the single
+    /// synthesized task rather than throwing, because a goal that plans coarsely
+    /// beats a goal that dies.
+    /// </para>
+    /// </summary>
+    private async Task<IReadOnlyList<TaskRecord>> DecomposeAsync(IChatCompletionService chat, Dispatch dispatch, CancellationToken ct)
+    {
+        try
+        {
+            var history = new ChatHistory();
+            history.AddSystemMessage(DecomposeSystemPrompt);
+            history.AddUserMessage(BuildDecomposeInstruction(dispatch));
+
+            // RETRY transient provider errors, like every other LLM call here.
+            // Fail-soft is the LAST resort, not the first response to a known-flaky
+            // provider: OpenRouter regularly returns finish_reason=error mid-stream
+            // ("Unknown ChatFinishReason value"), and without this a single hiccup
+            // permanently collapsed the goal to one task — the board would show 1
+            // step instead of 7 at random. Retrying is safe: decompose has no tools
+            // and no side effects.
+            string content = "";
+            for (var attempt = 1; attempt <= MaxComposeAttempts; attempt++)
+            {
+                try
+                {
+                    content = await GetComposeContentAsync(chat, history, ct);
+                    break;
+                }
+                catch (Exception ex) when (attempt < MaxComposeAttempts && IsTransientProviderError(ex, ct))
+                {
+                    _logger.LogWarning("decompose_transient attempt {Attempt}/{Max}: {Message}; retrying", attempt, MaxComposeAttempts, ex.Message);
+                    await Task.Delay(TimeSpan.FromMilliseconds(400 * attempt), ct);
+                }
+            }
+
+            var json = ExtractJson(content);
+            if (json is null)
+            {
+                _logger.LogWarning("decompose_unparseable — falling back to a single task");
+                return SynthesizeTasks(dispatch);
+            }
+
+            var proposed = JsonSerializer.Deserialize<DecomposeResult>(json, ContractJson.Options)?.Tasks;
+            if (proposed is null || proposed.Count == 0)
+            {
+                _logger.LogWarning("decompose_empty — falling back to a single task");
+                return SynthesizeTasks(dispatch);
+            }
+
+            var (tasks, repairs) = TaskDag.Sanitize(proposed
+                .Select((t, i) => new TaskRecord
+                {
+                    TaskId = string.IsNullOrWhiteSpace(t.Id) ? $"t{i + 1}" : t.Id,
+                    GoalId = dispatch.GoalId,
+                    Title = t.Title ?? dispatch.Objective,
+                    DependsOn = t.DependsOn ?? [],
+                    Capabilities = t.Capabilities ?? []
+                })
+                .ToArray());
+
+            foreach (var repair in repairs)
+            {
+                _logger.LogWarning("decompose_repaired {Repair}", repair);
+            }
+
+            _logger.LogInformation("decomposed {GoalId} into {Count} task(s){Repaired}",
+                dispatch.GoalId, tasks.Count, repairs.Count > 0 ? $" ({repairs.Count} repaired)" : "");
+            await _trace.ThinkingAsync($"broke the goal into {tasks.Count} steps: {string.Join(" → ", tasks.Select(t => t.Title))}");
+            return tasks;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "decompose_failed — falling back to a single task");
+            return SynthesizeTasks(dispatch);
+        }
+    }
+
+    private const string DecomposeSystemPrompt = """
+        You break a home-assistant goal into the few steps needed to achieve it.
+        Reply with JSON only (no prose, no Markdown, no code fence):
+        { "tasks": [ { "id": "t1", "title": "short imperative step", "depends_on": [], "capabilities": ["Inventory"] } ] }
+
+        Rules:
+        - Between 1 and 8 tasks. Fewer, meaningful steps beat many trivial ones.
+        - Order them so dependencies come first; depends_on lists ids from THIS list only.
+        - A task is a unit of work worth showing a person as "next step" — not a tool call.
+        - capabilities: which listed modules the step will likely use. Advisory.
+        - Do NOT state world facts (what is in the fridge, who is busy). You cannot
+          see the world here; a later pass grounds each step against it.
+        """;
+
+    /// <summary>The decompose instruction: the contract + what this device can actually do.</summary>
+    private string BuildDecomposeInstruction(Dispatch dispatch)
+        => $"""
+        Task Contract:
+        {ContractJson.Serialize(dispatch)}
+
+        Capabilities available on this device:
+        {string.Join("\n", _capabilities.Descriptors.Where(d => d.Available).Select(d => $"- {d.Name}"))}
+        """;
+
+    /// <summary>The decompose call's wire shape (snake_case via ContractJson).</summary>
+    private sealed record DecomposeResult
+    {
+        public List<DecomposedTask> Tasks { get; init; } = [];
+    }
+
+    private sealed record DecomposedTask
+    {
+        public string? Id { get; init; }
+        public string? Title { get; init; }
+        public List<string>? DependsOn { get; init; }
+        public List<string>? Capabilities { get; init; }
+    }
 
     /// <summary>The grounding instruction (user message) rendered from the contract.</summary>
     internal static string BuildGroundingInstruction(Dispatch dispatch)
@@ -227,10 +542,30 @@ public sealed class GoalAgent
     private async Task<PlanReady> RunCoreAsync(Dispatch dispatch, CancellationToken ct)
     {
         using var scope = _trace.BeginGoalScope(dispatch.GoalId, dispatch.CorrelationId);
-        _safety.SetPolicy(dispatch.Constraints.Hard);
+        // Arm THIS goal's hard constraints and enter its scope: every kernel call
+        // made inside this async flow is checked against them and nothing else.
+        // (Previously one shared field — a second goal overwrote it mid-plan.)
+        using var policy = _safety.BeginGoal(dispatch.GoalId, dispatch.Constraints.Hard);
         _safety.SetTrace(_trace);
 
         _logger.LogInformation("plan_start domain={Domain} model_clock={Today}", dispatch.Domain, _clock.Today);
+        // PRE-CHECK GATE 1: can this goal be planned at all? Before a single token
+        // is spent. A plan built while signed out is a plan that cannot be
+        // delivered, and finding that out at approval time wastes the user's
+        // decision as well as the tokens.
+        var precheck = await _prechecks.RunForDispatchAsync(dispatch, ct);
+        if (!precheck.Ok)
+        {
+            return BuildPrecheckBlockedPlan(dispatch, precheck);
+        }
+
+        var chat = _kernel.Services.GetRequiredService<IChatCompletionService>();
+
+        // ALTITUDE ONE: what are the pieces of this goal? Structure only, no tools,
+        // no world facts — that is what grounding below is for. Fails soft to one
+        // task, so the goal always plans.
+        var taskDag = await DecomposeAsync(chat, dispatch, ct);
+
         await _trace.PhaseAsync("grounding");
         var ground = await _grounding.AssembleAsync(dispatch, _kernel, ct);
 
@@ -240,7 +575,7 @@ public sealed class GoalAgent
 
         var groundingSettings = new OpenAIPromptExecutionSettings
         {
-            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(ReadOnlyPlanningFunctions(), autoInvoke: true, options: new FunctionChoiceBehaviorOptions
+            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(GroundingFunctions(), autoInvoke: true, options: new FunctionChoiceBehaviorOptions
             {
                 AllowConcurrentInvocation = false,
                 AllowParallelCalls = false
@@ -249,7 +584,6 @@ public sealed class GoalAgent
             MaxTokens = 2500
         };
 
-        var chat = _kernel.Services.GetRequiredService<IChatCompletionService>();
         var groundingSummary = await RunGroundingPassAsync(chat, history, groundingSettings, ct);
 
         if (groundingSummary.Length > 0)
@@ -278,9 +612,9 @@ public sealed class GoalAgent
         }
 
         var worldSnapshot = await _monitor.CaptureSnapshotAsync(ct);
-        var demoEvents = dispatch.Domain == "meal_plan"
-            ? _monitor.GetDemoEventsCatalog(worldSnapshot)
-            : null;
+        // Whether this domain has fire-able events is the observer's business, not
+        // a domain name this method has to recognise.
+        var demoEvents = _monitor.DemoEventsFor(dispatch.Domain, worldSnapshot);
 
         var ready = new PlanReady
         {
@@ -291,7 +625,8 @@ public sealed class GoalAgent
             {
                 Plan = modelPlan.Plan,
                 Proposals = proposals,
-                Safety = new SafetyVerdict { Gate = _safety.Gate, Violations = _safety.Violations.ToArray() },
+                Safety = new SafetyVerdict { Gate = _safety.GateFor(dispatch.GoalId), Violations = _safety.ViolationsFor(dispatch.GoalId).ToArray() },
+                Precheck = ToPrecheckVerdict(precheck),
                 Impact = modelPlan.Impact,
                 DemoEvents = demoEvents,
                 Explanation = modelPlan.Explanation
@@ -299,12 +634,18 @@ public sealed class GoalAgent
         };
 
         await _trace.PhaseAsync("awaiting_approval");
-        _activeGoals[dispatch.GoalId] = new ActiveGoalContext
+        var goal = _tasks.CreateGoal(dispatch, taskDag, worldSnapshot);
+        goal.Plan = modelPlan.Plan;
+        // The compose above planned the whole goal in one pass, so every task is
+        // planned and waiting on the same approval. (Per-task planning — pulling
+        // one task off the frontier at a time — is the next altitude; the DAG and
+        // the ledger are what make it possible.)
+        foreach (var task in goal.Tasks)
         {
-            Dispatch = dispatch,
-            Plan = modelPlan.Plan,
-            WorldSnapshot = worldSnapshot
-        };
+            await _tasks.TransitionAsync(dispatch.GoalId, task.TaskId, TaskState.Ready);
+            await _tasks.TransitionAsync(dispatch.GoalId, task.TaskId, TaskState.Planning);
+            await _tasks.TransitionAsync(dispatch.GoalId, task.TaskId, TaskState.AwaitingApproval);
+        }
         _logger.LogInformation("plan_ready items={ItemCount} proposals={ProposalCount} safety={Safety}", ready.Payload.Plan.Count, ready.Payload.Proposals.Count, ready.Payload.Safety.Gate);
         return ready;
     }
@@ -342,7 +683,10 @@ public sealed class GoalAgent
             var summary = new StringBuilder();
             try
             {
-                await foreach (var chunk in chat.GetStreamingChatMessageContentsAsync(history, settings, _kernel, ct))
+                // The grounding pass calls tools and streams its reasoning, so it gets
+                // the widest budget of any call here — but a budget nonetheless.
+                using var cts = Deadline(ct, StreamingCallBudget);
+                await foreach (var chunk in chat.GetStreamingChatMessageContentsAsync(history, settings, _kernel, cts.Token))
                 {
                     if (!string.IsNullOrEmpty(chunk.Content))
                     {
@@ -430,7 +774,8 @@ public sealed class GoalAgent
 
         try
         {
-            var response = await chat.GetChatMessageContentAsync(history, jsonSettings, _kernel, ct);
+            using var cts = Deadline(ct, LlmCallBudget);
+            var response = await chat.GetChatMessageContentAsync(history, jsonSettings, _kernel, cts.Token);
             var content = response.Content ?? "";
             if (!string.IsNullOrWhiteSpace(content))
             {
@@ -458,7 +803,8 @@ public sealed class GoalAgent
             Temperature = 0.1,
             MaxTokens = 6000
         };
-        var response = await chat.GetChatMessageContentAsync(history, strictSettings, _kernel, ct);
+        using var cts = Deadline(ct, LlmCallBudget);
+        var response = await chat.GetChatMessageContentAsync(history, strictSettings, _kernel, cts.Token);
         return response.Content ?? "";
     }
 
@@ -481,7 +827,7 @@ public sealed class GoalAgent
         use a new id only to ADD a step. Honor the steer.
         """;
 
-    private async Task<Proposal?> ProposeDailyAdaptationAsync(string goalId, ActiveGoalContext active, WorldChange change, CancellationToken ct, string? eventId = null)
+    private async Task<Proposal?> ProposeDailyAdaptationAsync(string goalId, GoalRecord active, WorldChange change, CancellationToken ct, string? eventId = null)
     {
         var chat = _kernel.Services.GetRequiredService<IChatCompletionService>();
         var history = new ChatHistory();
@@ -631,7 +977,8 @@ public sealed class GoalAgent
         {
             try
             {
-                var resp = await chat.GetChatMessageContentAsync(history, settings, _kernel, ct);
+                using var cts = Deadline(ct, LlmCallBudget);
+                var resp = await chat.GetChatMessageContentAsync(history, settings, _kernel, cts.Token);
                 var content = resp.Content ?? "";
                 if (!string.IsNullOrWhiteSpace(content))
                 {
@@ -669,7 +1016,8 @@ public sealed class GoalAgent
     private (ExecutedEffect Effect, IReadOnlyList<PlanItem>? Updated, IReadOnlyList<string> ChangedIds, IReadOnlyList<ImpactItem> ImpactDelta) ApplyPendingPatch(string proposalId)
     {
         _approvals.MarkExecuted(proposalId);
-        if (!_pendingPatches.Remove(proposalId, out var pending) || !_activeGoals.TryGetValue(pending.GoalId, out var active))
+        var active = _pendingPatches.TryRemove(proposalId, out var pending) ? _tasks.GetGoal(pending.GoalId) : null;
+        if (active is null)
         {
             return (new ExecutedEffect { ProposalId = proposalId, Action = $"{PlanPatchModule}.{PlanPatchFunction}", Result = "skipped", Detail = "no pending patch or active goal" }, null, [], []);
         }
@@ -727,8 +1075,17 @@ public sealed class GoalAgent
     private async Task<Status> ApplyApprovalCoreAsync(Approval approval, CancellationToken ct)
     {
         using var scope = _trace.BeginGoalScope(approval.GoalId, approval.CorrelationId);
+        // Enter THIS goal's armed policy before actuating anything. This path
+        // invokes approved proposals through the kernel, so the filter runs again
+        // here — the last gate before a real side effect (spending money, starting
+        // an appliance). It used to arm nothing at all and silently inherited
+        // whatever policy the last plan run left behind.
+        using var policy = _safety.EnterGoal(approval.GoalId);
         _safety.SetTrace(_trace);
         await _trace.PhaseAsync("executing");
+        // The human answered, so every task waiting on that answer moves. This is
+        // where a goal stops being 0% — progress is the ledger, not the clock.
+        await AdvanceTasksAsync(approval.GoalId, TaskState.AwaitingApproval, TaskState.Executing);
         var cleared = _approvals.ApplyDecisions(approval);
         var executed = new List<ExecutedEffect>();
         IReadOnlyList<PlanItem>? updatedPlan = null;
@@ -753,6 +1110,29 @@ public sealed class GoalAgent
                 continue;
             }
 
+            // PRE-CHECK GATE 2: can this effect actually happen, right now? The world
+            // moves between planning and approval — and approval is precisely where
+            // the delay is, because it waits on a person. An oven that was online
+            // when planned can be unplugged by the time someone taps Approve.
+            var effectCheck = await _prechecks.RunForProposalAsync(proposal, ct);
+            if (!effectCheck.Ok)
+            {
+                // DEFERRED, not failed and not silently dropped: the approval still
+                // stands, so re-applying it once the world recovers executes it (the
+                // ledger is idempotent). MarkExecuted is deliberately NOT called —
+                // marking it executed would lose the effect forever.
+                _logger.LogWarning("proposal_deferred {ProposalId} {Module}.{Function}: {Why}",
+                    proposal.ProposalId, proposal.Module, proposal.Function, effectCheck.Remediation);
+                executed.Add(new ExecutedEffect
+                {
+                    ProposalId = proposal.ProposalId,
+                    Action = $"{proposal.Module}.{proposal.Function}",
+                    Result = ExecutionResults.DeferredPrecheck,
+                    Detail = effectCheck.Remediation
+                });
+                continue;
+            }
+
             var function = _kernel.Plugins.GetFunction(proposal.Module, proposal.Function);
             var args = ToKernelArguments(proposal.Args);
             _logger.LogInformation("execute_proposal {ProposalId} {Module}.{Function}", proposal.ProposalId, proposal.Module, proposal.Function);
@@ -767,6 +1147,12 @@ public sealed class GoalAgent
             });
         }
 
+        // Effects are done; the plan now lives in the world and the observers watch
+        // it. Monitoring is not "finished" — a meal week is only complete when its
+        // last day has passed — so tasks rest here, not at Completed.
+        await AdvanceTasksAsync(approval.GoalId, TaskState.Executing, TaskState.Monitoring);
+        var progress = _tasks.GetGoal(approval.GoalId);
+
         return new Status
         {
             GoalId = approval.GoalId,
@@ -779,23 +1165,27 @@ public sealed class GoalAgent
                 UpdatedPlan = updatedPlan,
                 ChangedIds = changedIds,
                 ImpactDelta = impactDelta,
-                Note = executed.Count == 0 ? "No new proposals executed; approval may be a replay or rejection." : $"Executed {executed.Count} proposal(s)."
+                Note = executed.Count == 0
+                    ? "No new proposals executed; approval may be a replay or rejection."
+                    : $"Executed {executed.Count} proposal(s).{ProgressNote(progress)}"
             }
         };
     }
 
     private async Task<(Status Status, Proposal? Adaptation)> HandleControlCoreAsync(Control control, CancellationToken ct)
     {
-        var correlationId = _activeGoals.TryGetValue(control.GoalId, out var activeForScope)
-            ? activeForScope.Dispatch.CorrelationId
-            : null;
+        var correlationId = _tasks.GetGoal(control.GoalId)?.Dispatch.CorrelationId;
         using var scope = _trace.BeginGoalScope(control.GoalId, correlationId);
+        // A control tick can re-plan a slice of this goal (trigger_event →
+        // ProposeDailyAdaptationAsync), so enter its policy scope too.
+        using var policy = _safety.EnterGoal(control.GoalId);
         await _trace.PhaseAsync("monitoring");
 
         if (control.Command == ControlCommands.TriggerEvent)
         {
             var eventId = control.Payload?.EventId ?? control.EventId;
-            if (!_activeGoals.TryGetValue(control.GoalId, out var activeGoal))
+            var activeGoal = _tasks.GetGoal(control.GoalId);
+            if (activeGoal is null)
             {
                 var noGoalStatus = BuildMonitoringStatus(
                     control.GoalId,
@@ -819,12 +1209,11 @@ public sealed class GoalAgent
                 return (missingStatus, null);
             }
 
-            var ev = activeGoal.WorldSnapshot["daily_events"]?["events"]?.AsArray()
-                .Select(n => n?.AsObject())
-                .OfType<JsonObject>()
-                .FirstOrDefault(e => string.Equals(e["id"]?.GetValue<string>(), eventId, StringComparison.Ordinal));
-
-            if (ev is null)
+            // The goal's domain observer owns the catalog and knows how to turn one
+            // entry into a change; this path just asks. (It used to read
+            // daily_events out of the snapshot itself.)
+            var change = _monitor.TriggerEvent(activeGoal, eventId);
+            if (change is null)
             {
                 var unknownStatus = BuildMonitoringStatus(
                     control.GoalId,
@@ -836,7 +1225,6 @@ public sealed class GoalAgent
                 return (unknownStatus, null);
             }
 
-            var change = _monitor.BuildDailyEventChange(activeGoal, ev);
             if (!activeGoal.EmittedMaterialChanges.Add(change.Key))
             {
                 var replayStatus = BuildMonitoringStatus(
@@ -892,12 +1280,14 @@ public sealed class GoalAgent
 
         if (control.Command == ControlCommands.Reset)
         {
-            var store = _kernel.Services.GetRequiredService<MockWorldStore>();
+            var store = _kernel.Services.GetRequiredService<IProductApiAdapter>();
             await store.ResetAsync(ct);
-            _activeGoals.Remove(control.GoalId);
+            _tasks.RemoveGoal(control.GoalId);
+            _safety.RemoveGoal(control.GoalId);
         }
 
-        if (!_activeGoals.TryGetValue(control.GoalId, out var active))
+        var active = _tasks.GetGoal(control.GoalId);
+        if (active is null)
         {
             var noGoalStatus = new Status
             {
@@ -914,6 +1304,22 @@ public sealed class GoalAgent
             };
             await _trace.ThinkingAsync(noGoalStatus.Payload.Note);
             return (noGoalStatus, null);
+        }
+
+        // A monitored goal has to be able to FINISH, or the board shows it working
+        // forever. It is done when the world moves past what it planned for: the
+        // time window closes. Derived from the clock against the contract — the
+        // agent doesn't decide it's finished, the calendar does.
+        if (await CompleteIfWindowPassedAsync(active, ct))
+        {
+            var doneStatus = BuildMonitoringStatus(
+                control.GoalId,
+                active.Dispatch.CorrelationId,
+                false,
+                $"goal complete — its time window closed on {active.Dispatch.TimeWindow.End}.{ProgressNote(active)}",
+                null);
+            await _trace.ThinkingAsync(doneStatus.Payload.Note ?? "");
+            return (doneStatus with { TaskStatus = TaskStatuses.Done }, null);
         }
 
         var changes = await _monitor.ObserveAsync(active, ct);
@@ -972,30 +1378,19 @@ public sealed class GoalAgent
             }
         };
 
-    private IReadOnlyList<KernelFunction> ReadOnlyPlanningFunctions()
-    {
-        var names = new (string Module, string Function)[]
-        {
-            ("Inventory", "ListItems"),
-            ("Inventory", "GetExpiringItems"),
-            ("Inventory", "CheckAvailability"),
-            ("Calendar", "GetEvents"),
-            ("Calendar", "GetBusyEvenings"),
-            ("Recipes", "FindRecipes"),
-            ("Recipes", "GetRecipe"),
-            ("ShoppingList", "GetList"),
-            ("Reminders", "List"),
-            ("Guests", "GetEvent"),
-            ("Guests", "GetGuests"),
-            ("Guests", "GetDietaryConstraints"),
-            ("Appliance", "ListAppliances")
-        };
-        return names.Select(n => _kernel.Plugins.GetFunction(n.Module, n.Function)).ToArray();
-    }
+    /// <summary>
+    /// The planner's grounding tool set — DERIVED by the Capability Manager from
+    /// what the product pack registered, not hand-listed here. Both the CONTENT
+    /// and the ORDER are what the LLM receives as its tools array; the M0 gate
+    /// (<c>--dump-capabilities</c>) diffs both against what the old hand-written
+    /// whitelist produced.
+    /// </summary>
+    internal IReadOnlyList<KernelFunction> GroundingFunctions()
+        => _capabilities.GetGroundingFunctions(_kernel);
 
     private ProposalItem NormalizeProposal(ProposalItem proposal)
     {
-        var tier = CapabilityRegistry.GetSideEffectTier(proposal.Module, proposal.Function) ?? proposal.Tier;
+        var tier = _capabilities.GetSideEffectTier(proposal.Module, proposal.Function) ?? proposal.Tier;
         return proposal with
         {
             Tier = tier,
@@ -1154,12 +1549,53 @@ public sealed class GoalAgent
     }
 
     /// <summary>
+    /// A deadline for ONE provider call, linked to the goal's own token.
+    ///
+    /// <para>
+    /// Without this a goal can hang forever. Observed twice in one session: the stream
+    /// delivered tokens, stopped mid-JSON, and never returned — the process stayed
+    /// alive, nothing was logged, and every surface kept reporting "Working out the
+    /// steps…". The provider was healthy; OpenRouter had simply routed that stream to
+    /// one that hung.
+    /// </para>
+    /// <para>
+    /// <c>HttpClient.Timeout</c> does NOT cover this. Streaming reads the response with
+    /// <c>ResponseHeadersRead</c>, so the timeout is satisfied the moment headers
+    /// arrive — everything after that is an unbounded read. The deadline has to be a
+    /// cancellation token.
+    /// </para>
+    /// <para>
+    /// Expiry cancels only the LINKED token, never the caller's, so
+    /// <see cref="IsTransientProviderError"/> sees <c>ct.IsCancellationRequested ==
+    /// false</c> and classifies it as transient. That is deliberate: a hang then flows
+    /// into the retry machinery that already exists for provider flakiness, rather than
+    /// needing a second path. A genuine shutdown cancels <c>ct</c> itself and still
+    /// propagates.
+    /// </para>
+    /// </summary>
+    private static CancellationTokenSource Deadline(CancellationToken ct, TimeSpan budget)
+    {
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(budget);
+        return cts;
+    }
+
+    /// <summary>
     /// True for TRANSPORT/provider flakiness worth retrying the LLM over — a
     /// finish_reason the OpenAI SDK can't deserialize (throws
     /// <see cref="ArgumentOutOfRangeException"/>), a JSON deserialization glitch in
-    /// the SDK, an HTTP 5xx/429/timeout — as opposed to a genuine cancellation
-    /// (which must propagate) or a modelling error (handled by the parse retry).
+    /// the SDK, an HTTP 5xx/429/timeout, or our own per-call deadline expiring — as
+    /// opposed to a genuine cancellation (which must propagate) or a modelling error
+    /// (handled by the parse retry).
     /// </summary>
+    /// <summary>
+    /// Gate 15's window onto the classifier. The gate's whole point is that a fired
+    /// deadline is judged TRANSIENT while a real cancellation is not — asserting that
+    /// against a copy of the rule would test the copy.
+    /// </summary>
+    internal static bool IsTransientProviderErrorForTests(Exception ex, CancellationToken ct)
+        => IsTransientProviderError(ex, ct);
+
     private static bool IsTransientProviderError(Exception ex, CancellationToken ct)
     {
         if (ct.IsCancellationRequested)
@@ -1169,6 +1605,7 @@ public sealed class GoalAgent
 
         var text = ex.ToString();
         return ex is HttpRequestException
+            || ex is OperationCanceledException     // our own per-call deadline fired (ct excluded above)
             || ex is TaskCanceledException          // client-side/socket timeout (ct excluded above)
             || ex is JsonException                  // SDK failed to deserialize the provider response
             || ex is ArgumentOutOfRangeException     // e.g. "Unknown ChatFinishReason value"

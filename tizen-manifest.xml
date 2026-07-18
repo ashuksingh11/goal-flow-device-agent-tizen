@@ -7,8 +7,6 @@
   </service-application>
   <privileges>
     <privilege>http://tizen.org/privilege/internet</privilege>
-    <!-- Launch the on-Hub NUI progress UI (org.goalflow.tizenui) via App Control. -->
-    <privilege>http://tizen.org/privilege/appmanager.launch</privilege>
     <!-- Needed by future real adapters if they persist synced agent state or cache local recipe/device data. -->
     <privilege>http://tizen.org/privilege/mediastorage</privilege>
     <!-- Needed by future real reminder/alert actuators. -->
