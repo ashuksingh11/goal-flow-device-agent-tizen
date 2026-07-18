@@ -57,6 +57,7 @@ public static class MessageTypes
     public const string Proposal = "proposal";
     public const string Status = "status";
     public const string Control = "control";
+    public const string Suggestions = "suggestions";
 }
 
 /// <summary>
@@ -77,6 +78,23 @@ public static class TaskStatuses
     public const string Monitoring = "monitoring";
     public const string Adapting = "adapting";
     public const string Done = "done";
+}
+
+/// <summary>
+/// What happened to an approved effect (<c>status.payload.executed[].result</c>).
+/// </summary>
+public static class ExecutionResults
+{
+    /// <summary>It ran.</summary>
+    public const string Executed = "executed";
+
+    /// <summary>
+    /// It did NOT run: a pre-check failed at actuation time (the oven went offline
+    /// between planning and approval). The approval still stands — re-applying it
+    /// once the world recovers executes it. NOT a failure, and not a silent drop:
+    /// v3-M3.
+    /// </summary>
+    public const string DeferredPrecheck = "deferred_precheck";
 }
 
 /// <summary>

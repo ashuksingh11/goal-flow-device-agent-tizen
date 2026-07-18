@@ -1,27 +1,31 @@
 using GoalFlow.Device.Contracts;
-using GoalFlow.Device.Modules.Steering;
+using GoalFlow.Device.Harness;
 using GoalFlow.Device.Transport;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Tizen.Applications;
 
 namespace GoalFlow.Device;
 
 /// <summary>
-/// Headless Tizen service host for the v2 GoalFlow device agent. This class owns
-/// ONLY platform lifecycle + transport; the portable SK agent (DI container,
-/// capability plugins, steering modules) is built by <see cref="DeviceHost"/> and
-/// runs unchanged from the Ubuntu build.
+/// Headless Tizen service host for the v3 GoalFlow device agent. This class owns
+/// ONLY platform lifecycle + transport; the portable SK agent (DI container, the
+/// five harness components, the FamilyHub product pack) is built by
+/// <see cref="DeviceHost"/> and runs unchanged from the Ubuntu build.
 ///
 /// <see cref="ServiceApplication.OnCreate"/> must return promptly, so the
 /// long-running connect/receive loop runs on a background task; the WebSocket
 /// transport (<see cref="WsClient"/>) owns connect-retry + reconnect-on-drop.
+///
+/// v3-M9: the device-side on-Hub UI was dropped, so the App-Control launch + Message
+/// Port forwarding (the old <c>UiChannel</c>) is gone — this host now does only the
+/// cloud path, exactly like Ubuntu.
 /// </summary>
 public sealed class GoalFlowService : ServiceApplication
 {
     private CancellationTokenSource? _cts;
     private DeviceHost? _host;
     private Task? _connectLoop;
-    private UiChannel? _ui;
     private string _deviceId = "";
     private string _deviceName = "";
 
@@ -47,12 +51,6 @@ public sealed class GoalFlowService : ServiceApplication
             _deviceId = config.ResolveDeviceId(dataDir);
             _deviceName = config.ResolveDeviceName(_deviceId);
             Tizen.Log.Info(DlogLoggerProvider.Tag, $"OnCreate: device_id={_deviceId} device_name={_deviceName}");
-
-            // TIZEN-ONLY: mirror progress to the on-Hub NUI UI (App Control launch +
-            // public Message Port). Best-effort; failures never affect planning or the
-            // cloud path. Started here so its control port is listening before dispatch.
-            _ui = new UiChannel();
-            _ui.Start();
 
             var wsUrl = config.Get("WS_URL", "ws://localhost:8000/ws");
             Tizen.Log.Info(DlogLoggerProvider.Tag, $"OnCreate: host built, connecting to {wsUrl}");
@@ -83,17 +81,34 @@ public sealed class GoalFlowService : ServiceApplication
         try
         {
             await using var ws = new WsClient(url, loggerFactory.CreateLogger<WsClient>(), _deviceId, _deviceName);
-            // Tee every streamed agent_event to the on-Hub UI, then send to the cloud.
-            Func<AgentEvent, Task> emit = evt =>
-            {
-                _ui?.Forward(evt);
-                return ws.SendAsync(evt, ct);
-            };
-            var trace = new Trace(loggerFactory.CreateLogger<Trace>(), emit);
+            var trace = new Trace(loggerFactory.CreateLogger<Trace>(), evt => ws.SendAsync(evt, ct));
             var agent = host.CreateAgent(trace);
 
             var capabilities = host.Capabilities.BuildCapabilitiesMessage(host.Kernel);
             await ws.ConnectAsync(capabilities, ct);
+
+            // Proactive suggestions (v3-M8): scan local state and offer goals the
+            // family hasn't asked for. Emitted on connect and after every control tick
+            // (advance_day / reset move the world, so the list is recomputed).
+            var suggesters = host.Provider.GetServices<ISuggester>().ToArray();
+            async Task EmitSuggestionsAsync()
+            {
+                try
+                {
+                    var items = new List<SuggestionItem>();
+                    foreach (var suggester in suggesters)
+                    {
+                        items.AddRange(await suggester.ScanAsync(ct));
+                    }
+                    await ws.SendAsync(new SuggestionsMessage { Items = items }, ct);
+                    log.LogInformation("suggestions emitted count={Count}", items.Count);
+                }
+                catch (Exception ex)
+                {
+                    log.LogError(ex, "suggestion scan failed");
+                }
+            }
+            await EmitSuggestionsAsync();
 
             ws.FrameReceived += (type, raw) =>
             {
@@ -104,27 +119,23 @@ public sealed class GoalFlowService : ServiceApplication
                         switch (type)
                         {
                             case MessageTypes.Dispatch:
-                                var dispatch = ContractJson.Deserialize<Dispatch>(raw);
-                                // Goal activated: launch + reset the UI, then stream to it.
-                                _ui?.OnGoalActivated(dispatch.GoalId, dispatch.Objective);
-                                var planReady = await agent.RunAsync(dispatch);
-                                _ui?.Forward(planReady);
+                                var planReady = await agent.RunAsync(ContractJson.Deserialize<Dispatch>(raw));
                                 await ws.SendAsync(planReady, ct);
                                 break;
                             case MessageTypes.Approval:
                                 var approvalStatus = await agent.ApplyApprovalAsync(ContractJson.Deserialize<Approval>(raw));
-                                _ui?.Forward(approvalStatus);
                                 await ws.SendAsync(approvalStatus, ct);
                                 break;
                             case MessageTypes.Control:
                                 var (status, proposal) = await agent.HandleControlAsync(ContractJson.Deserialize<Control>(raw));
-                                _ui?.Forward(status);
                                 await ws.SendAsync(status, ct);
                                 if (proposal is not null)
                                 {
-                                    _ui?.Forward(proposal);
                                     await ws.SendAsync(proposal, ct);
                                 }
+                                // The world moved — re-scan so a suggestion that came
+                                // true or went stale is reflected.
+                                await EmitSuggestionsAsync();
                                 break;
                         }
                     }
@@ -166,7 +177,6 @@ public sealed class GoalFlowService : ServiceApplication
         }
         finally
         {
-            _ui?.Dispose();
             _cts?.Dispose();
         }
 

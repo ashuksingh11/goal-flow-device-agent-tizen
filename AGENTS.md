@@ -2,23 +2,38 @@
 
 Context for an AI/coding session in this repo. Read first.
 
-## Status: v2 + MULTI-SESSION — in sync with ubuntu (last re-synced 2026-07-16)
+## Status: v3 — in sync with ubuntu (re-synced 2026-07-18, v3-M9)
 
 This is the **Tizen Family Hub** deployment of the GoalFlow device agent. It runs the
-v2 Semantic-Kernel design and is **in sync** with the source of truth,
-**`../goal-flow-device-agent-ubuntu`** (core re-synced 2026-07-16 to pick up the
-multi-session `device_id`/`device_name` handshake).
+v3 Semantic-Kernel design and is **in sync** with the source of truth,
+**`../goal-flow-device-agent-ubuntu`** (full re-sync 2026-07-18 to pick up all of
+M0–M8: the `Harness/`+`Products/` restructure, the five components, Task Manager,
+Pre-check Engine, the M7 use cases/plugins, and M8 proactive suggestions).
 
-The port is deliberately thin: the **portable v2 core is byte-for-byte identical**
+The port is deliberately thin: the **portable v3 core is byte-for-byte identical**
 to the Ubuntu build, and only the platform edges differ. Future re-syncs are a
 plain copy of the core + a `dotnet build` — NEVER overwrite the Tizen host files
-(`Program.cs`, `DeviceHost.cs`, `DeviceConfig.cs`, `DlogLogger.cs`, `AssemblyResolver.cs`,
-`UiChannel.cs`). Verify a re-sync with:
+(`Program.cs`, `DeviceHost.cs`, `DeviceConfig.cs`, `DlogLogger.cs`, `AssemblyResolver.cs`).
+Verify a re-sync with:
 
 ```bash
 UB=../goal-flow-device-agent-ubuntu/src/GoalFlow.Device
-for d in Agent Contracts Modules Transport; do diff -rq "$d" "$UB/$d"; done   # must print nothing
+for d in Agent Contracts Harness Products Transport; do diff -rq "$d" "$UB/$d"; done   # must print nothing
 ```
+
+**RELEASE-CRITICAL after any re-sync: the safety config must be PACKAGED.** The
+FamilyHub pack's `Products/FamilyHub/config/{policy,prechecks}.json` is resolved at
+runtime from `AppContext.BaseDirectory` and ships via the csproj
+`<Content Include="Products/**/config/*.json">` item. If that item is missing, the
+`.tpk` ships without those files and `SafetyPolicy.Load`/`PrecheckBindings.Load` return
+EMPTY on a missing file with NO exception and NO log — so the Hub boots, connects and
+plans with **zero safety enforcement**, silently. After a build, confirm:
+`find bin/Debug/net8.0/Products -name '*.json'` lists both files.
+
+**The device-side on-Hub UI was DROPPED in v3-M9.** The old `UiChannel.cs` (App Control
+launch + Message Port forwarding to `org.goalflow.tizenui`) and its `appmanager.launch`
+manifest privilege are gone; this host now does only the cloud path, exactly like Ubuntu.
+`../goal-flow-agent-tizen-ui` is not part of v3.
 
 **A core change may need host wiring on BOTH sides.** Example: `device_id` landed in the
 core (`Contracts/Hello.cs`, `Transport/WsClient.cs`) but each host resolves it its own
@@ -41,32 +56,32 @@ in `OnCreate` (dlog-logged) and passes them to `WsClient`.
 ## Layout
 
 - **Portable core (copied unchanged from ubuntu `src/GoalFlow.Device/`):**
-  - `Agent/GoalAgent.cs` — the SK agent: builds the kernel, auto function-calling
-    planner, approval/adaptation. `AgentSettings` + `BuildKernel` live here.
-  - `Contracts/*.cs` — v2 wire contracts (Dispatch, PlanReady, Proposal, Status,
-    Approval, Control, AgentEvent, Capabilities, Hello, ContractJson).
-  - `Modules/Capabilities/*Plugin.cs` — SK capability plugins (`KernelFunction`s):
-    Inventory, Calendar, Recipe, ShoppingList, Reminder, Guests, ApplianceControl,
-    FamilyProfiles, Budget, Notify + `MockWorldStore` (concrete world over `data/*.json`).
-  - `Modules/Steering/*` — `SafetyFilter` (IFunctionInvocationFilter), `ApprovalCoordinator`,
-    `Grounding`, `MonitorAdapt` (+ `MaterialityPolicy`), `Clock` (`IClock`/`SimulatedClock`),
-    `CapabilityRegistry`, `Trace`.
+  - `Agent/GoalAgent.cs` — the SK agent: builds the kernel, two-altitude planner (decompose
+    → per-task grounded planning), approval/adaptation, the per-call provider deadline.
+    `AgentSettings` + `BuildKernel` live here.
+  - `Contracts/*.cs` — v3 wire contracts (Dispatch, PlanReady, Proposal, Status, Approval,
+    Control, AgentEvent, Capabilities, Hello, **Suggestions**, ContractJson).
+  - `Harness/*` — the **five generic components** (zero product types): `CapabilityManager/`,
+    `SafetyPolicyEngine/` (SafetyFilter + declarative SafetyPolicy/SafetyRule/grades),
+    `PrecheckEngine/`, `TaskManager/` (task DAG + `IDomainObserver` + `ISuggester` +
+    `MonitorAdapt`), `ProductApiAdapter/` (the product seam), plus `Approval/`, `Grounding/`,
+    `Clock/`, `Trace/`.
+  - `Products/FamilyHub/*` — the **product pack** (all fridge specifics): `FamilyHubProduct.cs`
+    (the manifest — `AddFamilyHub` registers everything in one line), `Adapter/MockFamilyHubAdapter.cs`
+    (the mock world over `data/*.json`, behind `IProductApiAdapter`), `Plugins/*Plugin.cs` (10,
+    incl. `SecurityPlugin`), `Observers/*` (meal/guest/vacation/birthday domains), `Probes/`,
+    `InventorySuggester.cs`, and `config/{policy,prechecks}.json`.
   - `Transport/WsClient.cs` — thin WS transport (connect-retry + reconnect-on-drop,
     `FrameReceived` event, serialized `SendAsync`).
 - **Tizen platform edge (the ONLY device-specific code):**
   - `Program.cs` — `GoalFlowService : ServiceApplication`. `OnCreate` builds the host
     and starts the connect/receive loop on a background task (OnCreate must return);
-    `OnTerminate` cancels + disposes. Also constructs the `UiChannel` and tees each
-    outbound frame to it (a few one-line `_ui?.Forward(...)` calls + the emit wrap) —
-    these are the ONLY additions to the frame path and touch NO core file.
-  - `UiChannel.cs` — **Tizen host file, NEVER overwrite on re-sync.** Launches the on-Hub
-    NUI UI (`org.goalflow.tizenui`, repo `../goal-flow-agent-tizen-ui`) via App Control on
-    goal activation and forwards progress frames to it over a PUBLIC Message Port (ports
-    `goalflow.agent.control` in / `goalflow.ui.frames` out; buffer + `ui_ready` handshake).
-    Serializes via `ContractJson.Serialize` (a call). Best-effort, non-throwing — a UI
-    hiccup never affects planning or the cloud path.
+    `OnTerminate` cancels + disposes. Emits proactive `suggestions` on connect and after
+    each control tick (mirrors Ubuntu). Touches NO core file.
   - `DeviceHost.cs` — the DI container + kernel builder. Mirrors the Ubuntu `Program.cs`
-    wiring, but reads config via `DeviceConfig` (NOT env vars) and logs via dlog (NOT console).
+    wiring (`AddFamilyHub` + the five harness singletons; `CreateAgent` builds the
+    `TaskManager` wired to the trace hook), but reads config via `DeviceConfig` (NOT env
+    vars) and logs via dlog (NOT console).
   - `DeviceConfig.cs` — **env-free config** (see Tizen platform notes). Reads a bundled
     `goalflow.conf` (KEY=VALUE); keys: `OPENROUTER_API_KEY` (required), `OPENROUTER_BASE_URL`,
     `OPENROUTER_MODEL`, `WS_URL`, `GOALFLOW_DATA_DIR`, `GOALFLOW_DATE`, `LOG_LEVEL`. Also
@@ -98,7 +113,7 @@ edge files (the portable core is untouched):
    throw). Config comes from `DeviceConfig` reading a bundled `goalflow.conf`
    (copy `goalflow.conf.example` → `goalflow.conf`, gitignored, holds the API key).
    Env vars still win off-device (desktop parity).
-3. **Read-only resource dir + folder mapping (bin, not res).** `MockWorldStore`
+3. **Read-only resource dir + folder mapping (bin, not res).** `MockFamilyHubAdapter`
    mutates `data/*.json`, but the bundled `data/` ships read-only.
    `DeviceConfig.ResolveDataDir()` seeds a writable copy into the app `Data` ROOT on
    first run and points the store there. **CRITICAL:** the csproj bundles `data/**`
@@ -125,18 +140,21 @@ edge files (the portable core is untouched):
    but that only helps when the platform did not already load the assembly — the
    version pin is the real fix.
 
-## v2 invariants (do NOT regress)
+## Invariants (do NOT regress)
 
 - **LLM-ONLY.** Planning goes through the SK kernel + OpenRouter. There is NO
-  `GOALFLOW_PLANNER=rules|scripted|llm` — that model was removed in v2.
+  `GOALFLOW_PLANNER=rules|scripted|llm` — that model was removed in v2 and never came back.
 - **Generic clock.** `SimulatedClock` anchored at real today (or `$GOALFLOW_DATE`);
   `set_date` / `advance_day` controls drive it. No hardcoded anchor date anywhere.
-- **The v1 adapter seam is gone.** There is no `IInventoryApi` / `GOALFLOW_ADAPTERS=mock|tizen`.
-  The world is the concrete `MockWorldStore` reading bundled `data/*.json` (works on the
-  Hub — it's just JSON). **Wiring real Tizen actuators is future work behind the capability
-  plugins** — change what a plugin *does* (e.g. `NotifyPlugin`/`ReminderPlugin`/
-  `ApplianceControlPlugin` → real Tizen.Applications APIs), not a separate adapter set.
-  The manifest already reserves the privileges.
+- **Real actuators are future work behind the pack.** The world is the concrete
+  `MockFamilyHubAdapter` (behind `IProductApiAdapter`) reading bundled `data/*.json` (works on
+  the Hub — it's just JSON). Making it real means either a new `IProductApiAdapter`
+  implementation or changing what a plugin *does* (e.g. `NotifyPlugin`/`ReminderPlugin`/
+  `ApplianceControlPlugin`/`SecurityPlugin` → real Tizen.Applications APIs) — not a separate
+  adapter set. The manifest already reserves the privileges (alarm, notification, mediastorage).
+- **Safety is declarative and MUST be packaged.** The harness implements rule KINDS;
+  `Products/FamilyHub/config/policy.json` binds them. It ships as csproj `<Content>` — see the
+  release-critical note at the top; a missing file is silently empty, i.e. no enforcement.
 
 ## Build & run
 

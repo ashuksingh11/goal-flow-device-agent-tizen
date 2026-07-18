@@ -38,6 +38,16 @@
     <Content Include="data/**/*.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- RELEASE-CRITICAL (v3-M9). The FamilyHub product pack's safety policy and
+         prechecks live here and are resolved at runtime from AppContext.BaseDirectory
+         (== the bundle's bin on Tizen). If this Content item is missing, the .tpk
+         ships WITHOUT policy.json/prechecks.json, and SafetyPolicy.Load / PrecheckBindings.Load
+         return EMPTY on a missing file with NO exception and NO log — so the Hub would
+         boot, connect and plan with ZERO safety enforcement (no allergen/budget/quiet-hours
+         gating), silently. Mirrors the Ubuntu csproj. Do not drop it. -->
+    <Content Include="Products/**/config/*.json"
+             Link="Products/%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
     <!-- Env-free config bundled into the .tpk resource dir (Tizen services get no
          shell environment). goalflow.conf is gitignored (holds a secret); copy
          goalflow.conf.example → goalflow.conf and fill it in before packaging. -->
