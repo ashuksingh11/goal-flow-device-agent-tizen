@@ -191,6 +191,123 @@ public sealed class GoalAgent
     public Task<(Status Status, Proposal? Adaptation)> HandleControlAsync(Control control, CancellationToken ct = default)
         => HandleControlCoreAsync(control, ct);
 
+    /// <summary>
+    /// A WORLD-level clock command (no goal_id): advance the GLOBAL clock EXACTLY ONCE,
+    /// then fan out over every active goal — observe each, emit its status (+ an
+    /// adaptation proposal when a material change is newly surfaced) — and summarise the
+    /// day's world events as one <see cref="DayAdvanced"/>. The clock is device-wide, so
+    /// one tick moves the whole world; the per-goal machinery (each <see cref="GoalRecord"/>
+    /// owns its snapshot + <c>EmittedMaterialChanges</c> dedup) already exists.
+    /// </summary>
+    public async Task<ControlResult> HandleWorldControlAsync(Control control, CancellationToken ct = default)
+    {
+        // Advance the one global clock exactly once.
+        if (_clock is SimulatedClock sim)
+        {
+            if (control.Command == ControlCommands.SetDate && control.Payload?.Date is { } date)
+                sim.SetDate(date);
+            else if (control.Command == ControlCommands.AdvanceDay)
+                sim.AdvanceDay();
+        }
+
+        if (control.Command == ControlCommands.Reset)
+        {
+            var store = _kernel.Services.GetRequiredService<IProductApiAdapter>();
+            await store.ResetAsync(ct);
+            // A world reset clears every goal for a clean slate.
+            foreach (var g in _tasks.ActiveGoals)
+            {
+                _tasks.RemoveGoal(g.Dispatch.GoalId);
+                _safety.RemoveGoal(g.Dispatch.GoalId);
+            }
+            return new ControlResult(
+                Array.Empty<Status>(),
+                Array.Empty<Proposal>(),
+                new DayAdvanced { SimDate = _clock.Today.ToString("yyyy-MM-dd"), Day = 0, Events = [] });
+        }
+
+        var statuses = new List<Status>();
+        var proposals = new List<Proposal>();
+        var events = new Dictionary<string, DayEvent>(StringComparer.Ordinal);
+
+        foreach (var goal in _tasks.ActiveGoals)
+        {
+            var goalId = goal.Dispatch.GoalId;
+            using var scope = _trace.BeginGoalScope(goalId, goal.Dispatch.CorrelationId);
+            using var policy = _safety.EnterGoal(goalId);
+
+            // A monitored goal finishes when its window closes — the calendar decides, not the agent.
+            if (await CompleteIfWindowPassedAsync(goal, ct))
+            {
+                statuses.Add(BuildMonitoringStatus(goalId, goal.Dispatch.CorrelationId, false,
+                    $"goal complete — its time window closed on {goal.Dispatch.TimeWindow?.End}.{ProgressNote(goal)}", null)
+                    with { TaskStatus = TaskStatuses.Done });
+                continue;
+            }
+
+            var changes = await _monitor.ObserveAsync(goal, ct);
+            var material = changes.FirstOrDefault(c => c.Material && goal.EmittedMaterialChanges.Add(c.Key));
+            if (material is not null)
+            {
+                await _trace.PhaseAsync("adapting");
+                var proposal = material.Steer is not null
+                    ? await ProposeDailyAdaptationAsync(goalId, goal, material, ct)
+                    : await _monitor.ProposeAdaptationAsync(goalId, material, ct);
+                if (proposal is not null)
+                {
+                    proposals.Add(proposal with { CorrelationId = goal.Dispatch.CorrelationId });
+                }
+                statuses.Add(BuildMonitoringStatus(goalId, goal.Dispatch.CorrelationId, true, $"material: {material.Description}"));
+                AddDayEvent(events, material, goalId);
+            }
+            else
+            {
+                var quiet = changes.Any(c => c.Material)
+                    ? "on track; material change already surfaced for approval."
+                    : "on track; no material world changes affect the active plan.";
+                statuses.Add(BuildMonitoringStatus(goalId, goal.Dispatch.CorrelationId, false, quiet));
+            }
+        }
+
+        var summary = new DayAdvanced
+        {
+            SimDate = _clock.Today.ToString("yyyy-MM-dd"),
+            Day = ComputeSimDay(),
+            Events = events.Values.ToArray()
+        };
+        return new ControlResult(statuses, proposals, summary);
+    }
+
+    /// <summary>Record a material world change against the day summary, merging goal_ids across goals.</summary>
+    private static void AddDayEvent(Dictionary<string, DayEvent> events, WorldChange change, string goalId)
+    {
+        if (events.TryGetValue(change.Key, out var existing))
+        {
+            events[change.Key] = existing with { GoalIds = [.. existing.GoalIds, goalId] };
+            return;
+        }
+        events[change.Key] = new DayEvent
+        {
+            Id = change.Key,
+            Title = change.Description,
+            Kind = change.Kind,
+            Summary = change.Description,
+            GoalIds = [goalId]
+        };
+    }
+
+    /// <summary>1-based sim day, measured from the earliest active goal's window start.</summary>
+    private int ComputeSimDay()
+    {
+        var starts = _tasks.ActiveGoals
+            .Select(g => DateOnly.TryParse(g.Dispatch.TimeWindow?.Start, out var s) ? s : (DateOnly?)null)
+            .Where(s => s.HasValue)
+            .Select(s => s!.Value)
+            .ToArray();
+        if (starts.Length == 0) return 0;
+        return Math.Max(1, _clock.Today.DayNumber - starts.Min().DayNumber + 1);
+    }
+
     private const int MaxComposeAttempts = 3;
 
     /// <summary>
@@ -306,7 +423,22 @@ public sealed class GoalAgent
     /// </summary>
     private async Task<bool> CompleteIfWindowPassedAsync(GoalRecord goal, CancellationToken ct)
     {
-        if (!DateOnly.TryParse(goal.Dispatch.TimeWindow.End, out var end) || _clock.Today <= end)
+        // A plan is complete once the clock passes its LAST DAY. Derive that from the
+        // plan's OWN day span (Day 1..N, anchored at the dispatch start) rather than the
+        // LLM's dispatch-window end — so completion lines up with the board's day-by-day
+        // progress reaching 100%. Fall back to the dispatch window end when there is no plan.
+        DateOnly lastDay;
+        if (DateOnly.TryParse(goal.Dispatch.TimeWindow?.Start, out var start) && goal.Plan.Count > 0)
+        {
+            var maxDay = Math.Max(1, goal.Plan.Max(p => p.Day));
+            lastDay = start.AddDays(maxDay - 1);
+        }
+        else if (!DateOnly.TryParse(goal.Dispatch.TimeWindow?.End, out lastDay))
+        {
+            return false;
+        }
+
+        if (_clock.Today <= lastDay)
         {
             return false;
         }
@@ -322,8 +454,8 @@ public sealed class GoalAgent
             await _tasks.TransitionAsync(goal.Dispatch.GoalId, task.TaskId, TaskState.Completed);
         }
 
-        _logger.LogInformation("goal_complete {GoalId} window_end={End} progress={Progress}%",
-            goal.Dispatch.GoalId, goal.Dispatch.TimeWindow.End, goal.ProgressPercent);
+        _logger.LogInformation("goal_complete {GoalId} last_day={LastDay} progress={Progress}%",
+            goal.Dispatch.GoalId, lastDay, goal.ProgressPercent);
         return true;
     }
 
@@ -471,13 +603,52 @@ public sealed class GoalAgent
 
         Grounding rules:
         - This is LLM-only planning. Use Semantic Kernel read-only tools for grounding; do not invent inventory, calendar, recipe, reminder, or shopping-list facts.
-        - Call these read tools when relevant: Inventory.ListItems, Inventory.GetExpiringItems, Calendar.GetBusyEvenings, Calendar.GetEvents, Recipes.FindRecipes, ShoppingList.GetList, Reminders.List, Guests.GetEvent, Guests.GetGuests, Guests.GetDietaryConstraints, Appliance.ListAppliances.
+        - Call these read tools when relevant: Inventory.ListItems, Inventory.GetExpiringItems, Inventory.CheckAvailability, Calendar.GetEvents, Calendar.GetBusyEvenings, Recipes.FindRecipes, Recipes.GetRecipe, ShoppingList.GetList, Reminders.List, Guests.GetEvent, Guests.GetGuests, Guests.GetDietaryConstraints, Appliance.ListAppliances, FamilyProfiles.GetProfiles, FamilyProfiles.GetMember, Budget.GetBudgetStatus, Budget.EstimateCost, Security.GetSecurityStatus.
+        - Ground what THIS contract's domain needs — not what a meal week would need.
         - Guest tools are relevant only when the contract domain/objective/scope/context mentions guests, hosting, RSVPs, or a dinner party. Do not use guest data for an ordinary meal_plan goal.
         - For domain guest_dinner, ground guests, dietary constraints, appliance state, recipes, inventory, calendar, shopping list, and reminders; Appliance.ListAppliances is the read-only source for oven/dishwasher/fridge availability.
+        - For domain vacation_prep, ground Security.GetSecurityStatus, Appliance.ListAppliances, Calendar.GetEvents for the departure and return, and Inventory.GetExpiringItems for perishables that would spoil while the house is empty.
+        - For domain grocery_cost, ground Inventory.ListItems, ShoppingList.GetList, Budget.GetBudgetStatus and Budget.EstimateCost — the basket has to be priced, not guessed.
+        - For domain energy_saving, ground Appliance.ListAppliances (each appliance carries its energy draw) and Calendar.GetBusyEvenings for when the household actually needs them.
+        - For domain birthday_party, ground FamilyProfiles, Budget.GetBudgetStatus, Calendar.GetEvents and Guests where a guest list exists.
         - During planning side effects are intentionally not exposed as tools.
         - Do not produce the final plan yet.
         - Return a concise grounding summary of the facts, constraints, candidate recipes, missing items, and scheduling context that the final plan must use.
         """;
+
+    /// <summary>
+    /// The plan shape for ONE domain — the only one injected into the compose prompt.
+    ///
+    /// <para>
+    /// v3.5 first shipped this as a table of all six shapes in the prompt. That worked,
+    /// but it sent five irrelevant shapes on every call: ~1.7k extra characters, and
+    /// more branching for the model to reason through before it could start writing.
+    /// On a reasoning model that inflates REASONING tokens, which is the slow half of
+    /// the call, and pushes a 90s compose toward its deadline (see
+    /// <see cref="LlmCallBudget"/>) or an empty response under json response_format.
+    /// The contract names exactly one domain, so only that shape is worth sending —
+    /// shorter AND sharper, since the meal shape is no longer in front of a model
+    /// planning a vacation. That bleed was the original bug.
+    /// </para>
+    /// </summary>
+    internal static string PlanShapeRule(string domain) => domain switch
+    {
+        "meal_plan" =>
+            "produce EXACTLY 7 dinner plan items for a one-week plan — Day 1 through Day 7 — no more and no fewer. Do not tie the count to any dates.",
+        "guest_dinner" =>
+            "a menu that honors guest dietary constraints, plus a prep timeline whose plan item \"when\" values include times where useful (YYYY-MM-DDTHH:mm), shopping proposals for missing ingredients, appliance prep proposals, and reminders. "
+            + "Prefer concrete appliance proposals when the grounded appliances support them: Appliance.PreheatOven before an oven-warmed dish, Appliance.RunProgram for dishwasher cleanup before quiet_hours, and Appliance.Defrost only when a frozen item needs thawing.",
+        "vacation_prep" =>
+            "a pre-departure checklist, NOT meals: finish or freeze the perishables that would spoil while the house is empty, clear the shopping list of standing orders, set appliances to eco or off, run the dishwasher before leaving, then lock up and arm security for the away period. Security.LockAllDoors and Security.ArmSecurity belong here.",
+        "birthday_party" =>
+            "invitations and headcount, cake and supplies costed inside the budget cap, and a day-of schedule.",
+        "grocery_cost" =>
+            "a restock and spend plan: what to buy now, what to defer, what to substitute cheaper — priced against the budget cap, not guessed.",
+        "energy_saving" =>
+            "a scheduling plan against the savings target: shift heavy appliance runs into the off-peak window, prefer eco programs, and cut standby waste.",
+        _ =>
+            "infer the shape from the objective: a checklist of concrete steps toward THAT outcome. The number of items follows the work, not a fixed count. Do not produce a week of dinners unless the goal is genuinely about planning meals.",
+    };
 
     /// <summary>The final no-tools compose instruction rendered from the contract.</summary>
     internal static string BuildPlanningInstruction(Dispatch dispatch)
@@ -489,17 +660,23 @@ public sealed class GoalAgent
         - Use the grounded facts and tool results already present in this conversation. Do not call tools in this step.
         - During planning side effects are intentionally not exposed as tools. Propose mutations in the final JSON instead.
         - Proposal module/function/args must match real side-effecting functions exactly.
-        - Valid side-effecting guest-dinner proposal functions include:
+        - Valid side-effecting proposal functions — ALL domains draw from this one list, with these exact arg shapes:
           ShoppingList.Add args {"items":["..."],"reason":"..."}
+          ShoppingList.Remove args {"items":["..."]}
           ShoppingList.PlaceOrder args {"estimatedTotal":42.50}
           Appliance.PreheatOven args {"targetC":180,"atTime":"YYYY-MM-DDTHH:mm"}
           Appliance.RunProgram args {"appliance":"dishwasher","program":"eco","atTime":"YYYY-MM-DDTHH:mm"}
           Appliance.Defrost args {"item":"...","atTime":"YYYY-MM-DDTHH:mm"}
           Reminders.Create args {"title":"...","date":"YYYY-MM-DD","time":"HH:mm"}
+          Reminders.Delete args {"id":"rem-001"}
+          Calendar.AddEvent args {"title":"...","date":"YYYY-MM-DD","start":"HH:mm","end":"HH:mm"}
+          Inventory.ConsumeItem args {"name":"spinach","quantity":1}
+          Security.LockAllDoors args {}
+          Security.ArmSecurity args {"mode":"away"}
+          Notify.SendNotification args {"member":"Priya","message":"..."}
+          Notify.Announce args {"message":"...","date":"YYYY-MM-DD","time":"HH:mm"}
         - Do not invent proposal functions such as Appliance.Preheat, Reminders.Add, or Reminder.Create.
-        - For meal_plan goals, produce EXACTLY 7 dinner plan items for a one-week plan — Day 1 through Day 7 — no more and no fewer. Do not tie the count to any dates.
-        - For guest_dinner, include a menu that honors guest dietary constraints, a prep timeline whose plan item "when" values include times where useful (YYYY-MM-DDTHH:mm), shopping proposals for missing ingredients, appliance prep proposals, and reminders.
-        - For guest_dinner appliance prep, prefer concrete proposals when grounded appliances support them: Appliance.PreheatOven before an oven-warmed dish, Appliance.RunProgram for dishwasher cleanup before quiet_hours, and Appliance.Defrost only when a frozen item needs thawing.
+        - PLAN SHAPE for this goal's domain ({{dispatch.Domain}}) — {{PlanShapeRule(dispatch.Domain)}}
         - Do not propose ingredients or recipes that violate hard constraints.
         - Propose AT MOST 5 side-effecting actions. NEVER emit duplicate proposals. Consolidate a
           recurring action (e.g. a nightly dishwasher run) into ONE proposal, not one per night. Keep
@@ -593,7 +770,7 @@ public sealed class GoalAgent
 
         await _trace.PhaseAsync("planning");
         var modelPlan = await ComposeModelPlanAsync(chat, history, dispatch, ct);
-        modelPlan = modelPlan with { Plan = AssignPlanDays(modelPlan.Plan) };
+        modelPlan = modelPlan with { Plan = AssignPlanDays(modelPlan.Plan, dispatch.Domain) };
 
         await _trace.PhaseAsync("checking");
         // Collapse duplicate proposals the model sometimes emits (e.g. the same
@@ -1069,8 +1246,73 @@ public sealed class GoalAgent
         return (ordered, changed);
     }
 
-    private static IReadOnlyList<PlanItem> AssignPlanDays(IReadOnlyList<PlanItem> plan)
-        => plan.Take(7).Select((item, index) => item with { Day = index + 1 }).ToArray();
+    /// <summary>
+    /// Stamps each plan item's 1-based <see cref="PlanItem.Day"/>.
+    ///
+    /// <para>
+    /// Day is NOT cosmetic: the device completes a goal at <c>Plan.Max(p =&gt; p.Day)</c> and
+    /// the cloud sizes the progress window from the same span, so a fabricated day count
+    /// stretches a goal across days it does not occupy.
+    /// </para>
+    ///
+    /// <para>
+    /// This used to be <c>plan.Take(7).Select((item, i) =&gt; item with { Day = i + 1 })</c>
+    /// for EVERY domain, which did two wrong things off the meal path: it silently dropped
+    /// items past the seventh, and it renumbered by POSITION. A vacation checklist whose
+    /// five steps all happen on departure evening (08:00, 19:00, 20:00, 20:05) became a
+    /// five-DAY goal creeping at 20%/day, still unfinished after the family had left.
+    /// </para>
+    ///
+    /// <para>
+    /// So: meal_plan keeps the ordinal — a dinner week IS one item per day by construction,
+    /// and the compose prompt asks for exactly seven. Every other domain derives the day
+    /// from the item's own <c>when</c> date relative to the earliest item, so same-day work
+    /// shares a day and the span reflects the real calendar.
+    /// </para>
+    /// </summary>
+    private static IReadOnlyList<PlanItem> AssignPlanDays(IReadOnlyList<PlanItem> plan, string domain)
+    {
+        if (plan.Count == 0)
+        {
+            return plan;
+        }
+
+        if (string.Equals(domain, "meal_plan", StringComparison.Ordinal))
+        {
+            return plan.Take(7).Select((item, index) => item with { Day = index + 1 }).ToArray();
+        }
+
+        var dates = plan.Select(item => ParseWhenDate(item.When)).ToArray();
+        var anchor = dates.Where(d => d.HasValue).Select(d => d!.Value).DefaultIfEmpty().Min();
+
+        // No item carried a usable date — fall back to the old ordinal so Day stays 1-based
+        // and monotonic rather than collapsing the whole plan onto day 0.
+        if (anchor == default)
+        {
+            return plan.Select((item, index) => item with { Day = index + 1 }).ToArray();
+        }
+
+        return plan
+            .Select((item, index) => item with
+            {
+                // An undated item among dated ones is scheduled "whenever" — anchor it to
+                // day 1 so it surfaces first rather than inventing a day for it.
+                Day = dates[index] is { } d ? d.DayNumber - anchor.DayNumber + 1 : 1
+            })
+            .ToArray();
+    }
+
+    /// <summary>Date half of an ISO "YYYY-MM-DD" or "YYYY-MM-DDTHH:mm" plan item time.</summary>
+    private static DateOnly? ParseWhenDate(string? when)
+    {
+        if (string.IsNullOrWhiteSpace(when))
+        {
+            return null;
+        }
+
+        var datePart = when.Split('T')[0];
+        return DateOnly.TryParse(datePart, out var parsed) ? parsed : null;
+    }
 
     private async Task<Status> ApplyApprovalCoreAsync(Approval approval, CancellationToken ct)
     {
@@ -1148,8 +1390,8 @@ public sealed class GoalAgent
         }
 
         // Effects are done; the plan now lives in the world and the observers watch
-        // it. Monitoring is not "finished" — a meal week is only complete when its
-        // last day has passed — so tasks rest here, not at Completed.
+        // it. Monitoring is not "finished" — a plan is only complete when its last day
+        // has passed — so tasks rest here, not at Completed.
         await AdvanceTasksAsync(approval.GoalId, TaskState.Executing, TaskState.Monitoring);
         var progress = _tasks.GetGoal(approval.GoalId);
 
@@ -1157,7 +1399,10 @@ public sealed class GoalAgent
         {
             GoalId = approval.GoalId,
             CorrelationId = approval.CorrelationId,
-            TaskStatus = TaskStatuses.Done,
+            // The goal is now MONITORING day by day, NOT done — reporting Done here made
+            // the board jump to "completed, 100%" the instant a plan was approved. It
+            // finishes only when its window/plan passes (CompleteIfWindowPassedAsync).
+            TaskStatus = TaskStatuses.Monitoring,
             Payload = new StatusPayload
             {
                 SimDate = _clock.Today.ToString("yyyy-MM-dd"),

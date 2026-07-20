@@ -2,13 +2,23 @@
 
 Context for an AI/coding session in this repo. Read first.
 
-## Status: v3 — in sync with ubuntu (re-synced 2026-07-18, v3-M9)
+## Status: v3 — in sync with ubuntu (re-synced 2026-07-20, v3.6.2)
 
 This is the **Tizen Family Hub** deployment of the GoalFlow device agent. It runs the
 v3 Semantic-Kernel design and is **in sync** with the source of truth,
-**`../goal-flow-device-agent-ubuntu`** (full re-sync 2026-07-18 to pick up all of
-M0–M8: the `Harness/`+`Products/` restructure, the five components, Task Manager,
-Pre-check Engine, the M7 use cases/plugins, and M8 proactive suggestions).
+**`../goal-flow-device-agent-ubuntu`**. The 2026-07-20 re-sync picked up everything
+since the M9 sync: **v3.2** (global "advance day" world tick — `ControlResult`,
+`DayAdvanced`, and the world-level `Control` branch), **v3.4** (the `grocery_cost` and
+`energy_saving` domains + their observers and `data/{energy,grocery}.json`), **v3.5 /
+v3.5.1** (planner de-biased off the meal shape, date-derived plan days, single-domain
+plan-shape prompt). v3.6.x was board/cloud only — no device change to port. The earlier
+2026-07-18 sync brought M0–M8: the `Harness/`+`Products/` restructure, the five
+components, Task Manager, Pre-check Engine, the M7 use cases/plugins, and M8 suggestions.
+
+**Host wiring the v3.2 core needed (done):** the world-tick `Control` branch in
+`Program.cs` — a goal-less, non-`trigger_event` control calls
+`agent.HandleWorldControlAsync` and fans out its statuses/proposals/day-summary. Copying
+the core alone would compile but leave "advance day" routed to the old per-goal path.
 
 The port is deliberately thin: the **portable v3 core is byte-for-byte identical**
 to the Ubuntu build, and only the platform edges differ. Future re-syncs are a

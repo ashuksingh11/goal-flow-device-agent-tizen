@@ -127,11 +127,25 @@ public sealed class GoalFlowService : ServiceApplication
                                 await ws.SendAsync(approvalStatus, ct);
                                 break;
                             case MessageTypes.Control:
-                                var (status, proposal) = await agent.HandleControlAsync(ContractJson.Deserialize<Control>(raw));
-                                await ws.SendAsync(status, ct);
-                                if (proposal is not null)
+                                var control = ContractJson.Deserialize<Control>(raw);
+                                if (string.IsNullOrEmpty(control.GoalId) && control.Command != ControlCommands.TriggerEvent)
                                 {
-                                    await ws.SendAsync(proposal, ct);
+                                    // WORLD-level tick (v3.2): advance the clock once, fan out to
+                                    // every active goal, and summarise the day's world events.
+                                    var world = await agent.HandleWorldControlAsync(control);
+                                    foreach (var s in world.Statuses) await ws.SendAsync(s, ct);
+                                    foreach (var p in world.Proposals) await ws.SendAsync(p, ct);
+                                    if (world.DayAdvanced is not null) await ws.SendAsync(world.DayAdvanced, ct);
+                                }
+                                else
+                                {
+                                    // Per-goal control (a trigger_event) — the older scoped path.
+                                    var (status, proposal) = await agent.HandleControlAsync(control);
+                                    await ws.SendAsync(status, ct);
+                                    if (proposal is not null)
+                                    {
+                                        await ws.SendAsync(proposal, ct);
+                                    }
                                 }
                                 // The world moved — re-scan so a suggestion that came
                                 // true or went stale is reflected.
