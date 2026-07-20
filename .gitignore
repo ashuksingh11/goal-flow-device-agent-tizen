@@ -16,6 +16,14 @@ artifacts/
 goalflow.conf
 *.local.json
 
+# Per-instance mock-world dirs (desktop/Ubuntu-parity runs; seeded from ./data). On
+# Tizen the writable world lives in the app Data dir, outside the repo — this is only
+# for off-device runs of this project.
+data-*/
+
+# Runtime-generated pairing id persisted in the seed data dir on first run.
+data/device_id
+
 # OS cruft
 .DS_Store
 Thumbs.db
