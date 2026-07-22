@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.OpenAI;
+using Stopwatch = System.Diagnostics.Stopwatch;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -249,6 +250,8 @@ public sealed class GoalAgent
             var material = changes.FirstOrDefault(c => c.Material && goal.EmittedMaterialChanges.Add(c.Key));
             if (material is not null)
             {
+                _logger.LogInformation("world_change_material goal={GoalId} kind={Kind} target_day={TargetDay} key={Key}",
+                    goalId, material.Kind, material.TargetDay, material.Key);
                 await _trace.PhaseAsync("adapting");
                 var proposal = material.Steer is not null
                     ? await ProposeDailyAdaptationAsync(goalId, goal, material, ct)
@@ -265,6 +268,7 @@ public sealed class GoalAgent
                 var quiet = changes.Any(c => c.Material)
                     ? "on track; material change already surfaced for approval."
                     : "on track; no material world changes affect the active plan.";
+                _logger.LogDebug("world_change_none goal={GoalId} observed={Observed}", goalId, changes.Count);
                 statuses.Add(BuildMonitoringStatus(goalId, goal.Dispatch.CorrelationId, false, quiet));
             }
         }
@@ -275,6 +279,8 @@ public sealed class GoalAgent
             Day = ComputeSimDay(),
             Events = events.Values.ToArray()
         };
+        _logger.LogInformation("world_tick command={Command} sim_date={SimDate} day={Day} goals={Goals} events={Events} proposals={Proposals}",
+            control.Command, summary.SimDate, summary.Day, _tasks.ActiveGoals.Count(), summary.Events.Count, proposals.Count);
         return new ControlResult(statuses, proposals, summary);
     }
 
@@ -744,6 +750,7 @@ public sealed class GoalAgent
         var taskDag = await DecomposeAsync(chat, dispatch, ct);
 
         await _trace.PhaseAsync("grounding");
+        var groundingClock = Stopwatch.StartNew();
         var ground = await _grounding.AssembleAsync(dispatch, _kernel, ct);
 
         var history = new ChatHistory();
@@ -762,6 +769,8 @@ public sealed class GoalAgent
         };
 
         var groundingSummary = await RunGroundingPassAsync(chat, history, groundingSettings, ct);
+        _logger.LogInformation("grounding_done goal={GoalId} elapsed_ms={Elapsed} chars={Chars}",
+            dispatch.GoalId, groundingClock.ElapsedMilliseconds, groundingSummary.Length);
 
         if (groundingSummary.Length > 0)
         {
@@ -769,8 +778,11 @@ public sealed class GoalAgent
         }
 
         await _trace.PhaseAsync("planning");
+        var composeClock = Stopwatch.StartNew();
         var modelPlan = await ComposeModelPlanAsync(chat, history, dispatch, ct);
-        modelPlan = modelPlan with { Plan = AssignPlanDays(modelPlan.Plan, dispatch.Domain) };
+        _logger.LogInformation("compose_done goal={GoalId} elapsed_ms={Elapsed} items={Items} proposals={Proposals}",
+            dispatch.GoalId, composeClock.ElapsedMilliseconds, modelPlan.Plan.Count, modelPlan.Proposals.Count);
+        modelPlan = modelPlan with { Plan = AssignPlanDays(modelPlan.Plan, dispatch.Domain, _clock.Today) };
 
         await _trace.PhaseAsync("checking");
         // Collapse duplicate proposals the model sometimes emits (e.g. the same
@@ -1235,9 +1247,19 @@ public sealed class GoalAgent
                 order.Add(row.Id);
                 next = next.Day > 0 ? next : next with { Day = order.Count };
             }
-            else if (next.Day <= 0)
+            else
             {
-                next = next with { Day = byId[row.Id].Day };
+                // Editing an existing day: keep its stable Day and calendar When (v4.2) when
+                // the patch row omits them — an adaptation changes the dish, not the date.
+                var prev = byId[row.Id];
+                if (next.Day <= 0)
+                {
+                    next = next with { Day = prev.Day };
+                }
+                if (string.IsNullOrWhiteSpace(next.When) && !string.IsNullOrWhiteSpace(prev.When))
+                {
+                    next = next with { When = prev.When };
+                }
             }
             byId[row.Id] = next;
             if (!changed.Contains(row.Id))
@@ -1274,7 +1296,7 @@ public sealed class GoalAgent
     /// shares a day and the span reflects the real calendar.
     /// </para>
     /// </summary>
-    private static IReadOnlyList<PlanItem> AssignPlanDays(IReadOnlyList<PlanItem> plan, string domain)
+    private static IReadOnlyList<PlanItem> AssignPlanDays(IReadOnlyList<PlanItem> plan, string domain, DateOnly mealAnchor)
     {
         if (plan.Count == 0)
         {
@@ -1283,7 +1305,17 @@ public sealed class GoalAgent
 
         if (string.Equals(domain, "meal_plan", StringComparison.Ordinal))
         {
-            return plan.Take(7).Select((item, index) => item with { Day = index + 1 }).ToArray();
+            // A dinner week IS one item per day by construction. Stamp both the 1-based Day
+            // AND a real calendar When (anchor + Day-1) so surfaces can show "Tue, Jul 22"
+            // instead of an opaque "Day N" ordinal (v4.2). The anchor is the compose-time
+            // clock = plan Day 1's date; adaptations preserve each item's When by id.
+            return plan.Take(7)
+                .Select((item, index) => item with
+                {
+                    Day = index + 1,
+                    When = mealAnchor.AddDays(index).ToString("yyyy-MM-dd")
+                })
+                .ToArray();
         }
 
         var dates = plan.Select(item => ParseWhenDate(item.When)).ToArray();
@@ -1332,6 +1364,9 @@ public sealed class GoalAgent
         // The human answered, so every task waiting on that answer moves. This is
         // where a goal stops being 0% — progress is the ledger, not the clock.
         await AdvanceTasksAsync(approval.GoalId, TaskState.AwaitingApproval, TaskState.Executing);
+        var decisions = approval.Payload?.Decisions ?? [];
+        _logger.LogInformation("approval_received goal={GoalId} decisions={Total} approved={Approved} declined={Declined}",
+            approval.GoalId, decisions.Count, decisions.Count(d => d.Approved), decisions.Count(d => !d.Approved));
         var cleared = _approvals.ApplyDecisions(approval);
         var executed = new List<ExecutedEffect>();
         IReadOnlyList<PlanItem>? updatedPlan = null;
