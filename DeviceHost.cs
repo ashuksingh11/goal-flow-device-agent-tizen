@@ -39,19 +39,22 @@ public sealed class DeviceHost : IAsyncDisposable
     public IClock Clock { get; }
     public Kernel Kernel { get; }
     public CapabilityManager Capabilities { get; }
+    public AgentSettings Settings { get; }
 
     private DeviceHost(
         ServiceProvider provider,
         ILoggerFactory loggerFactory,
         IClock clock,
         Kernel kernel,
-        CapabilityManager capabilities)
+        CapabilityManager capabilities,
+        AgentSettings settings)
     {
         Provider = provider;
         LoggerFactory = loggerFactory;
         Clock = clock;
         Kernel = kernel;
         Capabilities = capabilities;
+        Settings = settings;
     }
 
     /// <summary>Build the DI container + kernel. Mirrors Ubuntu Program.cs.</summary>
@@ -94,6 +97,12 @@ public sealed class DeviceHost : IAsyncDisposable
             BaseUrl = config.Get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
             ModelId = config.Get("OPENROUTER_MODEL", "openai/gpt-oss-120b"),
         };
+        // Per-call LLM deadlines are tunable via goalflow.conf (raise if a slow/large model
+        // cancels planning mid-compose) — override only when set to a positive int.
+        if (int.TryParse(config.Get("LLM_CALL_TIMEOUT_SECONDS"), out var llmCallTimeout) && llmCallTimeout > 0)
+            settings = settings with { LlmCallTimeoutSeconds = llmCallTimeout };
+        if (int.TryParse(config.Get("LLM_STREAM_TIMEOUT_SECONDS"), out var llmStreamTimeout) && llmStreamTimeout > 0)
+            settings = settings with { LlmStreamTimeoutSeconds = llmStreamTimeout };
         var kernel = GoalAgent.BuildKernel(settings, provider);
 
         return new DeviceHost(
@@ -101,7 +110,8 @@ public sealed class DeviceHost : IAsyncDisposable
             loggerFactory,
             provider.GetRequiredService<IClock>(),
             kernel,
-            provider.GetRequiredService<CapabilityManager>());
+            provider.GetRequiredService<CapabilityManager>(),
+            settings);
     }
 
     /// <summary>
@@ -129,7 +139,8 @@ public sealed class DeviceHost : IAsyncDisposable
             tasks,
             Provider.GetRequiredService<PrecheckEngine>(),
             Clock,
-            LoggerFactory.CreateLogger<GoalAgent>());
+            LoggerFactory.CreateLogger<GoalAgent>(),
+            Settings);
     }
 
     /// <summary>The goal's frontier task title — Agent Board's "Next Step".</summary>
