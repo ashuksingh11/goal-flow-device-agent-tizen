@@ -23,6 +23,11 @@ OPENROUTER_MODEL=openai/gpt-oss-120b
 # LLM_CALL_TIMEOUT_SECONDS=180     # non-streaming compose / adaptation
 # LLM_STREAM_TIMEOUT_SECONDS=210   # streaming grounding pass
 
+# Optional — presenter-mode demo pacing (v5). >0 holds each harness engine's spotlight
+# for this many ms so a demo audience can watch the harness pipeline light up
+# engine-by-engine. 0/unset = OFF (real, honest timing). Suggested demo value ~1200-1500.
+# HARNESS_DWELL_MS=1500
+
 # Cloud hub WebSocket endpoint the device dials out to.
 WS_URL=ws://localhost:8000/ws
 
