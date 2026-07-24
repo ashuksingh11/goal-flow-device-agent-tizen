@@ -103,6 +103,10 @@ public sealed class DeviceHost : IAsyncDisposable
             settings = settings with { LlmCallTimeoutSeconds = llmCallTimeout };
         if (int.TryParse(config.Get("LLM_STREAM_TIMEOUT_SECONDS"), out var llmStreamTimeout) && llmStreamTimeout > 0)
             settings = settings with { LlmStreamTimeoutSeconds = llmStreamTimeout };
+        // HARNESS_DWELL_MS (v5, presenter mode): >0 holds each harness engine's spotlight so a
+        // demo audience can watch the pipeline light up. 0/unset = OFF (real timing). Allow 0.
+        if (int.TryParse(config.Get("HARNESS_DWELL_MS"), out var harnessDwell) && harnessDwell >= 0)
+            settings = settings with { HarnessDwellMs = harnessDwell };
         var kernel = GoalAgent.BuildKernel(settings, provider);
 
         return new DeviceHost(
