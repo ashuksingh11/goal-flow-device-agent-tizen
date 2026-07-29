@@ -2,7 +2,7 @@
 
 Context for an AI/coding session in this repo. Read first.
 
-## Status: v6 — in sync with ubuntu (re-synced 2026-07-29, v6-M3)
+## Status: v6 — in sync with ubuntu (re-synced 2026-07-29, v6-M3 + the approval-block fix)
 
 This is the **Tizen Family Hub** deployment of the GoalFlow device agent. It runs the
 v3 Semantic-Kernel design and is **in sync** with the source of truth,
@@ -28,6 +28,11 @@ Budget plugin report the goal's ARMED cap. **NO host wiring was needed** — the
 entirely inside the copied core plus `data/`. Three data files came with it:
 `budget.json` lost `cap` and `vacation.json` lost `away` (both are now dispatched policy),
 and `family.json` gained a warning that a `dietary` entry here enforces nothing.
+
+**Approval-block re-sync (2026-07-29, after M3):** a proposal the safety filter refuses at
+actuation is now reported as `blocked_safety` instead of `executed`, and is not marked
+executed. Core-only — `SafetyFilter.IsRefusal` + `GoalAgent.ApplyApprovalAsync` — so no host
+wiring, checked rather than assumed (`DeviceHost.cs` registers nothing new).
 
 **v6-M3 re-sync (2026-07-29)** brought the household envelope: `IPolicyResolver` (the
 seam) with `FamilyHubPolicyResolver` (the arithmetic — `min(budget_cap, envelope − spent)`),
