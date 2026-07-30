@@ -12,23 +12,23 @@ function-calling; safety is a deterministic `IFunctionInvocationFilter` that
 vets every pending call against the dispatch's hard constraints before the
 plugin method runs. Planning is **LLM-only** end to end, via OpenRouter.
 
-The port is deliberately thin: the **portable v2 core is byte-for-byte
-identical to the Ubuntu build**, and only the platform edges differ.
+The port is deliberately thin: the **portable core is copied from the Ubuntu build** and only
+the platform edges differ. Ubuntu is the source of truth; this repo is re-synced per milestone.
 
 ## Layout
 
 - **Portable core** (copied unchanged from ubuntu `src/GoalFlow.Device/`):
   - `Agent/GoalAgent.cs` — the SK agent: builds the kernel, drives the
     auto-function-calling planner, applies approvals, runs adaptation.
-  - `Contracts/*.cs` — the v2 wire contracts (Dispatch, PlanReady, Proposal,
+  - `Contracts/*.cs` — the C# mirror of the wire contracts (Dispatch, PlanReady, Proposal,
     Status, Approval, Control, AgentEvent, Capabilities, Hello, ContractJson).
-  - `Modules/Capabilities/*Plugin.cs` — SK capability plugins: Inventory,
-    Calendar, Recipe, ShoppingList, Reminder, Guests, ApplianceControl,
-    FamilyProfiles, Budget, Notify, plus `MockWorldStore` (the concrete world
-    over bundled `data/*.json`).
-  - `Modules/Steering/*` — deterministic harness modules: `SafetyFilter`,
-    `ApprovalCoordinator`, `Grounding`, `MonitorAdapt` (+ `MaterialityPolicy`),
-    `Clock` (`IClock` / `SimulatedClock`), `CapabilityRegistry`, `Trace`.
+  - `Harness/*` — the generic core, no product literals: `CapabilityManager/`,
+    `SafetyPolicyEngine/` (`ArmedPolicies` + `SafetyFilter` + declarative rules),
+    `PrecheckEngine/`, `TaskManager/`, `ProductApiAdapter/`, and `Approval/`,
+    `Grounding/`, `Clock/`, `Trace/`.
+  - `Products/FamilyHub/*` — everything fridge-specific: the eleven SK capability plugins,
+    the adapter over bundled `data/*.json`, probes, domain observers, and
+    `config/{policy,prechecks}.json`.
   - `Transport/WsClient.cs` — the outbound WebSocket transport (BCL
     `ClientWebSocket`, connect-retry, reconnect-on-drop, serialized sends).
   - `data/*.json` — the mock world and sample contracts.

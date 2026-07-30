@@ -1,10 +1,14 @@
 # Code Guide — GoalFlow Device Agent Tizen
 
-This repo is a Tizen.NET host shell around the copied v2 GoalFlow
-device-agent core. The SK agent, contracts, capability plugins, steering
-modules, transport, and seed data are the same code copied from
-`../goal-flow-device-agent-ubuntu`; the Tizen port adds only the service
-host, DI wiring, packaging manifest, and this documentation.
+This repo is a Tizen.NET host shell around the **copied** GoalFlow device-agent core. The SK
+agent, contracts, the generic `Harness/`, the `Products/FamilyHub/` pack, transport and seed data
+are the same code copied from `../goal-flow-device-agent-ubuntu` — which is the source of truth.
+The Tizen port adds only the service host, the DI wiring, the packaging manifest, and this file.
+
+**The trap this file exists to prevent:** DI resolves at RUNTIME, so a host missing a
+registration compiles perfectly and dies on the first goal. That has happened twice. A green
+`dotnet build` is not evidence the port works — compare `DeviceHost.cs` against Ubuntu's
+`Program.cs` line by line after every re-sync.
 
 ## File Map
 
@@ -14,21 +18,17 @@ Program.cs                     # GoalFlowService : ServiceApplication — the he
 DeviceHost.cs                  # DI container + SK kernel builder, mirrors Ubuntu Program.cs wiring
 tizen-manifest.xml             # background service package manifest + privileges
 Agent/GoalAgent.cs             # copied: SK kernel host — BuildKernel / RunAsync / ApplyApprovalAsync / HandleControlAsync
-Contracts/*.cs                 # copied: C# mirror of CONTRACT v2 (Dispatch, PlanReady, Proposal, Approval,
+Contracts/*.cs                 # copied: C# mirror of CONTRACT.md (Dispatch, PlanReady, Proposal, Approval,
                                 #         Status, Control, AgentEvent, Capabilities, Hello, ContractJson)
-Modules/Capabilities/          # copied: SK plugins — the LLM's tools
-  MockWorldStore.cs              # shared data/ access; resolves day offsets against IClock at read time
-  InventoryPlugin.cs CalendarPlugin.cs RecipePlugin.cs ShoppingListPlugin.cs
-  ReminderPlugin.cs GuestsPlugin.cs ApplianceControlPlugin.cs
-  FamilyProfilesPlugin.cs BudgetPlugin.cs NotifyPlugin.cs
-Modules/Steering/              # copied: deterministic harness modules (no LLM inside)
-  SafetyFilter.cs                # SK IFunctionInvocationFilter — the safety gate
-  ApprovalCoordinator.cs         # tiered proposal ledger (pending → approved → executed)
-  Grounding.cs                   # planner context assembler (clock, constraints verbatim, digest)
-  Clock.cs                       # IClock + SystemClock + SimulatedClock (generic clock)
-  MonitorAdapt.cs                # sustain loop: WorldChange + MaterialityPolicy + adaptation proposals
-  Trace.cs                       # agent_event streaming + structured logging
-  CapabilityRegistry.cs          # [SideEffect] attribute + capabilities-message discovery
+Harness/                       # copied: THE GENERIC CORE — no product literals
+  CapabilityManager/             # discovery, resolution, availability, the grounding set
+  SafetyPolicyEngine/            # ArmedPolicies (store) + SafetyFilter (SK filter seam) + rules
+  PrecheckEngine/                # probes + the two gates
+  TaskManager/                   # task DAG, lifecycle, retries, IDomainObserver
+  ProductApiAdapter/             # the seam plugins call instead of the world
+  Approval/ Grounding/ Clock/ Trace/
+Products/FamilyHub/            # copied: ALL fridge specifics
+  Adapter/ Plugins/ Probes/ Observers/ config/{policy,prechecks}.json
 Transport/WsClient.cs          # copied: outbound BCL ClientWebSocket to the cloud hub
 data/*.json                    # copied: mock world and sample contracts
 ```
@@ -67,12 +67,16 @@ so the copied core runs byte-for-byte unchanged:
 
 - **Clock**: `IClock` is a `SimulatedClock` anchored at real today, or at
   `$GOALFLOW_DATE` if set. No hardcoded anchor date.
-- **World + capability plugins**: a singleton `MockWorldStore(dataDir, clock)`
-  backs all ten capability plugins (Inventory, Calendar, Recipe,
-  ShoppingList, Reminder, Guests, ApplianceControl, FamilyProfiles, Budget,
-  Notify), each registered as a DI singleton.
-- **Steering modules**: `SafetyFilter`, `ApprovalCoordinator`, `Grounding`,
-  `MaterialityPolicy`, `MonitorAdapt`, `CapabilityRegistry`.
+- **The product pack**: `services.AddFamilyHub(dataDir)` — one line, and the only line here
+  that knows what product this is. It brings the mock world (behind `IProductApiAdapter`), the
+  eleven capability plugins, the `CapabilityManager`, the domain observers, the prechecks and
+  the proactive suggester.
+- **Harness components** (generic, no product types): `ArmedPolicies` **then**
+  `IActivePolicy → ArmedPolicies`, `SafetyFilter`, `ApprovalCoordinator`, `Grounding`,
+  `MonitorAdapt`, `PrecheckEngine`. The order matters and the first two are not optional:
+  `ArmedPolicies` is the policy *store* and depends on nothing, split out of the *enforcer* so
+  that a plugin reading the armed cap cannot close a dependency cycle back through the filter.
+  Omit them and `BudgetPlugin` cannot be constructed — at runtime, on the first goal.
 - **Kernel**: `AgentSettings` is populated from `OPENROUTER_API_KEY`
   (required — throws if missing), `OPENROUTER_BASE_URL`, and
   `OPENROUTER_MODEL`, then `GoalAgent.BuildKernel(settings, provider)` builds

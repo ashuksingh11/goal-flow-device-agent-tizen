@@ -211,5 +211,5 @@ edge files (the portable core is untouched):
 
 - **Commit identity:** author as `ashuksingh11`
   (`31301999+ashuksingh11@users.noreply.github.com`). **Push only when asked.**
-- **Workflow:** plan=Opus · design=Fable (only when asked / for architecture) · coding=Codex CLI · browsing=Sonnet.
+- **Workflow:** plan=Opus · design=Fable (only when asked / for architecture) · coding=Opus · browsing=Sonnet.
 - The canonical wire contract lives in `../goal-flow-cloud-agent/CONTRACT.md`.

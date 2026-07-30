@@ -6,7 +6,7 @@ The SK capability plugins read and write them through `MockWorldStore`.
 ## The generic-clock rule (hard invariant)
 
 **No absolute dates anywhere in mock data or code.** "Today" comes from `IClock`
-(`Modules/Steering/Clock.cs`): the real system date by default (`SystemClock`),
+(`Harness/Clock/Clock.cs`): the real system date by default (`SystemClock`),
 or a simulated date driven by `control` frames / `--date` (`SimulatedClock`,
 `set_date` + `advance_day`). Everything else is stored **relative**:
 
