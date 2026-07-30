@@ -2,7 +2,7 @@
 
 Context for an AI/coding session in this repo. Read first.
 
-## Status: v6 — in sync with ubuntu (re-synced 2026-07-29, v6-M3 + the approval-block fix)
+## Status: v7 — in sync with ubuntu (re-synced 2026-07-30, v7-M0…M6)
 
 This is the **Tizen Family Hub** deployment of the GoalFlow device agent. It runs the
 v3 Semantic-Kernel design and is **in sync** with the source of truth,
@@ -28,6 +28,25 @@ Budget plugin report the goal's ARMED cap. **NO host wiring was needed** — the
 entirely inside the copied core plus `data/`. Three data files came with it:
 `budget.json` lost `cap` and `vacation.json` lost `away` (both are now dispatched policy),
 and `family.json` gained a warning that a `dietary` entry here enforces nothing.
+
+**v7 re-sync (2026-07-30) — core copy + ONE host-side fix.** Everything v7 added lives in
+the copied core (`Harness/`, `Products/`, `Contracts/`, `Agent/`) plus two new world files,
+so **no `DeviceHost.cs` wiring was needed**: the host already calls
+`FamilyHubProduct.AddFamilyHub`, which is the single registration point, so the new
+`Workout` and `Deliveries` plugins arrive with it. `Program.cs` already routes a
+goal-SCOPED control to `HandleControlAsync`, which is where v7's `constraints_changed`
+branch lives, so the cross-goal path works without a new branch.
+
+**The one host-side change was `DeviceConfig.SeedIfEmpty` → `SeedMissing`.** The old rule
+("the writable dir already has json → leave it alone") has a failure mode with no symptom
+on a device: ship a build that adds a world file and any Hub that ran an older one silently
+lacks it — the observer that reads it throws `FileNotFoundException`, returns no changes,
+and the goal simply never adapts. Nothing errors, and unlike a dev box there is no scratch
+directory to delete. It now copies per-file with `overwrite: false`, so it adds what is
+missing and never clobbers state this Hub has been mutating.
+
+New data files to confirm are packaged: `workout.json`, `deliveries.json` (plus the edited
+`appliances.json` — it gained the robot vacuum — and `daily_events.json`).
 
 **Approval-block re-sync (2026-07-29, after M3):** a proposal the safety filter refuses at
 actuation is now reported as `blocked_safety` instead of `executed`, and is not marked

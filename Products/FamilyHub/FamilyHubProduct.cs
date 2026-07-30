@@ -69,6 +69,8 @@ public static class FamilyHubProduct
         services.AddSingleton<ApplianceControlPlugin>();
         services.AddSingleton<FamilyProfilesPlugin>();
         services.AddSingleton<BudgetPlugin>();
+        services.AddSingleton<WorkoutPlugin>();
+        services.AddSingleton<DeliveriesPlugin>();
 
         // How THIS product's world narrows a dispatched ceiling: the household envelope
         // minus what has already been spent (v6-M3). Registered in the pack because the
@@ -139,5 +141,11 @@ public static class FamilyHubProduct
         CapabilityDescriptor.From("Budget",         sp.GetRequiredService<BudgetPlugin>()),
         CapabilityDescriptor.From("Notify",         sp.GetRequiredService<NotifyPlugin>()),
         CapabilityDescriptor.From("Security",       sp.GetRequiredService<SecurityPlugin>()),
+        // APPENDED, not inserted (v7). The order above is the order the LLM sees its
+        // tools in, so slotting Workout next to FamilyProfiles — where it belongs
+        // conceptually — would shift every tool after it and change planning behaviour
+        // for reasons that have nothing to do with workouts.
+        CapabilityDescriptor.From("Workout",        sp.GetRequiredService<WorkoutPlugin>()),
+        CapabilityDescriptor.From("Deliveries",     sp.GetRequiredService<DeliveriesPlugin>()),
     ];
 }

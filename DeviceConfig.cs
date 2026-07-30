@@ -79,7 +79,7 @@ public sealed class DeviceConfig
             return "data"; // not running under the Tizen app framework (desktop/Ubuntu parity)
         }
 
-        SeedIfEmpty(BundledDataDir(), writable);
+        SeedMissing(BundledDataDir(), writable);
         return writable;
     }
 
@@ -181,12 +181,29 @@ public sealed class DeviceConfig
         }
     }
 
+    /// <summary>Does this directory hold a world at all? Used to locate the BUNDLE.</summary>
     private static bool HasJson(string dir)
         => Directory.Exists(dir) && Directory.EnumerateFiles(dir, "*.json").Any();
 
-    private static void SeedIfEmpty(string source, string target)
+    /// <summary>
+    /// Copy any bundled world file the writable dir does not have yet (v7).
+    ///
+    /// <para>
+    /// It used to skip a target that held ANY json ("already has a world"), which has a
+    /// failure mode with no symptom: ship a build that adds a world file and every Hub
+    /// that has run an older one silently lacks it — the observer that reads it throws
+    /// FileNotFoundException, returns no changes, and the goal simply never adapts.
+    /// Nothing errors, and on a device there is no scratch directory to delete.
+    /// </para>
+    ///
+    /// <para>
+    /// Per-file, and overwrite is FALSE, so a file this Hub has been mutating for weeks is
+    /// never clobbered by the bundle. This only ever adds what was never there.
+    /// </para>
+    /// </summary>
+    private static void SeedMissing(string source, string target)
     {
-        if (HasJson(target) || !Directory.Exists(source))
+        if (!Directory.Exists(source))
         {
             return;
         }
@@ -194,7 +211,9 @@ public sealed class DeviceConfig
         Directory.CreateDirectory(target);
         foreach (var file in Directory.EnumerateFiles(source, "*.json"))
         {
-            File.Copy(file, Path.Combine(target, Path.GetFileName(file)), overwrite: true);
+            var path = Path.Combine(target, Path.GetFileName(file));
+            if (File.Exists(path)) continue;
+            File.Copy(file, path, overwrite: false);
         }
     }
 
