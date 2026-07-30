@@ -82,6 +82,13 @@ public sealed class DeviceHost : IAsyncDisposable
         services.AddFamilyHub(dataDir);
 
         // Harness components (generic — no product types).
+        // ArmedPolicies is registered BEFORE the filter and depends on nothing: the
+        // filter enforces the armed policy, capability plugins only read it (v6-M2).
+        // HOST WIRING, not core: DI is resolved at RUNTIME, so a Hub missing these two
+        // lines builds perfectly and then fails to construct BudgetPlugin on the first
+        // goal — the class of break this file's guidance exists to catch.
+        services.AddSingleton<ArmedPolicies>();
+        services.AddSingleton<IActivePolicy>(sp => sp.GetRequiredService<ArmedPolicies>());
         services.AddSingleton<SafetyFilter>();
         services.AddSingleton<ApprovalCoordinator>();
         services.AddSingleton<Grounding>();

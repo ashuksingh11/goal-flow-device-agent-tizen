@@ -2,7 +2,7 @@
 
 Context for an AI/coding session in this repo. Read first.
 
-## Status: v3 — in sync with ubuntu (re-synced 2026-07-20, v3.6.2)
+## Status: v6 — in sync with ubuntu (re-synced 2026-07-29, v6-M3 + the approval-block fix)
 
 This is the **Tizen Family Hub** deployment of the GoalFlow device agent. It runs the
 v3 Semantic-Kernel design and is **in sync** with the source of truth,
@@ -19,6 +19,36 @@ components, Task Manager, Pre-check Engine, the M7 use cases/plugins, and M8 sug
 `Program.cs` — a goal-less, non-`trigger_event` control calls
 `agent.HandleWorldControlAsync` and fans out its statuses/proposals/day-summary. Copying
 the core alone would compile but leave "advance day" routed to the old per-goal path.
+
+**v6-M2 re-sync (2026-07-29)** brought the constraint-enforcement half of v6: the new
+`date_window_block` rule kind (the away window — an appliance run scheduled into an empty
+house is BLOCKED, endpoints exclusive), a `peak_hours` instance of the existing
+`time_window_block` kind, and the `ArmedPolicies`/`IActivePolicy` split that lets the
+Budget plugin report the goal's ARMED cap. **NO host wiring was needed** — the change is
+entirely inside the copied core plus `data/`. Three data files came with it:
+`budget.json` lost `cap` and `vacation.json` lost `away` (both are now dispatched policy),
+and `family.json` gained a warning that a `dietary` entry here enforces nothing.
+
+**Approval-block re-sync (2026-07-29, after M3):** a proposal the safety filter refuses at
+actuation is now reported as `blocked_safety` instead of `executed`, and is not marked
+executed. Core-only — `SafetyFilter.IsRefusal` + `GoalAgent.ApplyApprovalAsync` — so no host
+wiring, checked rather than assumed (`DeviceHost.cs` registers nothing new).
+
+**v6-M3 re-sync (2026-07-29)** brought the household envelope: `IPolicyResolver` (the
+seam) with `FamilyHubPolicyResolver` (the arithmetic — `min(budget_cap, envelope − spent)`),
+`SafetyFilter.BeginGoalAsync`/`ReResolveAsync`, `ShoppingList.PlaceOrder` accruing into
+`budget.spent`, and `GroceryCostObserver` raising a material change when another goal has
+eaten the shared budget. **No host wiring this time, and it was checked rather than
+assumed:** the resolver is registered inside `AddFamilyHub`, which this host already calls,
+and `SafetyFilter`'s new resolver parameter resolves from that same registration. No data
+files changed — `spent` moves at runtime now.
+
+**Host wiring the v6-M2 core needed (done):** `DeviceHost.cs` must register
+`ArmedPolicies` and `IActivePolicy` alongside `SafetyFilter`. DI is resolved at RUNTIME,
+so a host missing those two lines BUILDS CLEANLY and then fails to construct
+`BudgetPlugin` on the first goal. Copying the core alone is not enough — again.
+The new rules ship in `Products/FamilyHub/config/policy.json` — which makes the packaging
+check below release-critical for exactly the reason it was written.
 
 The port is deliberately thin: the **portable v3 core is byte-for-byte identical**
 to the Ubuntu build, and only the platform edges differ. Future re-syncs are a
