@@ -42,8 +42,10 @@ runs unchanged from the Ubuntu build. It does not create a window or use NUI.
 
 Lifecycle:
 
-- `OnCreate()` loads `.env`, calls `DeviceHost.Build(dataDir)` to construct
-  the DI container + kernel, resolves `WS_URL` (default
+- `OnCreate()` reads `goalflow.conf` through `DeviceConfig` — **a Tizen service has no
+  environment variables and no `.env`**, which is the whole reason that class exists — calls
+  `DeviceHost.Build(config, dataDir)` to construct the DI container + kernel, resolves `WS_URL`
+  (default
   `ws://localhost:8000/ws`), and starts the connect/receive loop
   (`RunAsync`) on a background `Task` — `OnCreate` must return promptly, so
   the long-running loop cannot block it.
@@ -87,8 +89,9 @@ caller-supplied `Trace` (kept off the container because the trace's `emit`
 callback depends on the live WebSocket), pulling `Grounding`, `SafetyFilter`,
 `ApprovalCoordinator`, `MonitorAdapt`, and `Clock` from the container.
 
-`DeviceHost` also owns the minimal BCL-only `.env` loader (`LoadDotEnv`) and
-log-level parsing (`LOG_LEVEL`).
+`DeviceConfig` owns the minimal BCL-only `KEY=VALUE` reader for `goalflow.conf` (bundled as a
+read-only `Resource`), and `DeviceHost` parses `LOG_LEVEL` from it. Logging goes to **dlog**,
+not the console — a headless Tizen service has no stdout.
 
 ## No Adapter Seam
 
