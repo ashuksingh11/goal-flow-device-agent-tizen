@@ -13,7 +13,7 @@ since the M9 sync: **v3.2** (global "advance day" world tick — `ControlResult`
 v3.5.1** (planner de-biased off the meal shape, date-derived plan days, single-domain
 plan-shape prompt). v3.6.x was board/cloud only — no device change to port. The earlier
 2026-07-18 sync brought M0–M8: the `Harness/`+`Products/` restructure, the five
-components, Task Manager, Pre-check Engine, the M7 use cases/plugins, and M8 suggestions.
+components, Task Manager, Pre-check Engine, and the M7 use cases/plugins.
 
 **Host wiring the v3.2 core needed (done):** the world-tick `Control` branch in
 `Program.cs` — a goal-less, non-`trigger_event` control calls
@@ -119,7 +119,7 @@ in `OnCreate` (dlog-logged) and passes them to `WsClient`.
     → per-task grounded planning), approval/adaptation, the per-call provider deadline.
     `AgentSettings` + `BuildKernel` live here.
   - `Contracts/*.cs` — v3 wire contracts (Dispatch, PlanReady, Proposal, Status, Approval,
-    Control, AgentEvent, Capabilities, Hello, **Suggestions**, ContractJson).
+    Control, AgentEvent, Capabilities, Hello, ContractJson).
   - `Harness/*` — the **five generic components** (zero product types): `CapabilityManager/`,
     `SafetyPolicyEngine/` (SafetyFilter + declarative SafetyPolicy/SafetyRule/grades),
     `PrecheckEngine/`, `TaskManager/` (task DAG + `IDomainObserver` + `ISuggester` +
@@ -135,8 +135,7 @@ in `OnCreate` (dlog-logged) and passes them to `WsClient`.
 - **Tizen platform edge (the ONLY device-specific code):**
   - `Program.cs` — `GoalFlowService : ServiceApplication`. `OnCreate` builds the host
     and starts the connect/receive loop on a background task (OnCreate must return);
-    `OnTerminate` cancels + disposes. Emits proactive `suggestions` on connect and after
-    each control tick (mirrors Ubuntu). Touches NO core file.
+    `OnTerminate` cancels + disposes. Touches NO core file.
   - `DeviceHost.cs` — the DI container + kernel builder. Mirrors the Ubuntu `Program.cs`
     wiring (`AddFamilyHub` + the five harness singletons; `CreateAgent` builds the
     `TaskManager` wired to the trace hook), but reads config via `DeviceConfig` (NOT env
