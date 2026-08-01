@@ -15,7 +15,12 @@ OPENROUTER_API_KEY=sk-or-...
 
 # Optional — defaults shown.
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-OPENROUTER_MODEL=openai/gpt-oss-120b
+#
+# THE `:nitro` SUFFIX IS NOT DECORATION — it is how this Hub gets a fast provider. See the
+# v8 block near the bottom of this file before you remove it. THIS IS THE ONLY PLACE
+# OPENROUTER_MODEL IS SET: keys are last-one-wins, so a second declaration further down
+# would silently beat whatever you edit here.
+OPENROUTER_MODEL=openai/gpt-oss-120b:nitro
 
 # Optional — per-call LLM deadlines (seconds). Raise these if a large/slow model or
 # provider load cancels planning mid-compose ("TaskCanceledException"); a healthy compose
@@ -63,11 +68,20 @@ WS_URL=ws://localhost:8000/ws
 # CANNOT move, because SK >= 1.61 depends on System.Text.Json 10.x and Tizen 12 ships its own
 # STJ 8.x as a platform assembly that wins the load. The `:nitro` suffix asks OpenRouter to
 # sort by throughput using nothing but the model id, so it needs no SK support at all.
-OPENROUTER_MODEL=openai/gpt-oss-120b:nitro
+# Verified: `openai/gpt-oss-120b:nitro` is served by Cerebras, the same endpoint the explicit
+# order reaches on Ubuntu.
+#
+# IT IS SET AT THE TOP OF THIS FILE, on the OPENROUTER_MODEL line — not here. Setting it twice
+# would mean the later line silently wins, and the one you edited did nothing.
+#
+# The trade you are making: `:nitro` re-sorts by throughput on every request, so it can pick a
+# different fast provider on a different day. Ubuntu's explicit order is reproducible. For a
+# rehearsed demo that difference is worth knowing about; for the Hub it is the only option.
 
-# The precise form. Harmless to set — it is simply not sent on this SK line, and the agent says
-# so at startup ("llm_routing ... !! this Semantic Kernel build has no ExtraBody"). It starts
-# working the day the STJ pin can be lifted.
+# The precise form, for the day the STJ pin can be lifted. Harmless to set now, but it does
+# NOTHING on SK 1.43 — and only then does the agent say so at startup
+# ("llm_routing ... !! this Semantic Kernel build has no ExtraBody"). Leave it commented and
+# the startup line reads `llm_routing off`, which is correct: nothing was asked for.
 # OPENROUTER_PROVIDER_ORDER=cerebras,groq
 # OPENROUTER_PROVIDER_ALLOW_FALLBACKS=true
 
