@@ -87,29 +87,6 @@ public sealed class GoalFlowService : ServiceApplication
             var capabilities = host.Capabilities.BuildCapabilitiesMessage(host.Kernel);
             await ws.ConnectAsync(capabilities, ct);
 
-            // Proactive suggestions (v3-M8): scan local state and offer goals the
-            // family hasn't asked for. Emitted on connect and after every control tick
-            // (advance_day / reset move the world, so the list is recomputed).
-            var suggesters = host.Provider.GetServices<ISuggester>().ToArray();
-            async Task EmitSuggestionsAsync()
-            {
-                try
-                {
-                    var items = new List<SuggestionItem>();
-                    foreach (var suggester in suggesters)
-                    {
-                        items.AddRange(await suggester.ScanAsync(ct));
-                    }
-                    await ws.SendAsync(new SuggestionsMessage { Items = items }, ct);
-                    log.LogInformation("suggestions emitted count={Count}", items.Count);
-                }
-                catch (Exception ex)
-                {
-                    log.LogError(ex, "suggestion scan failed");
-                }
-            }
-            await EmitSuggestionsAsync();
-
             ws.FrameReceived += (type, raw) =>
             {
                 _ = Task.Run(async () =>
@@ -147,9 +124,6 @@ public sealed class GoalFlowService : ServiceApplication
                                         await ws.SendAsync(proposal, ct);
                                     }
                                 }
-                                // The world moved — re-scan so a suggestion that came
-                                // true or went stale is reflected.
-                                await EmitSuggestionsAsync();
                                 break;
                         }
                     }

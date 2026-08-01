@@ -76,9 +76,8 @@ public sealed class DeviceHost : IAsyncDisposable
                 : new SimulatedClock());
 
         // THE PRODUCT PACK: the mock world (behind IProductApiAdapter), the capability
-        // plugins, the CapabilityManager, the domain observers, the prechecks, and the
-        // proactive suggester — all in one line. This is the ONLY line here that knows
-        // what product this is.
+        // plugins, the CapabilityManager, the domain observers and the prechecks — all
+        // in one line. This is the ONLY line here that knows what product this is.
         services.AddFamilyHub(dataDir);
 
         // Harness components (generic — no product types).
@@ -92,6 +91,7 @@ public sealed class DeviceHost : IAsyncDisposable
         services.AddSingleton<SafetyFilter>();
         services.AddSingleton<ApprovalCoordinator>();
         services.AddSingleton<Grounding>();
+        services.AddSingleton<RepeatReadFilter>();
         services.AddSingleton<MonitorAdapt>();
         services.AddSingleton<PrecheckEngine>();
 
@@ -144,6 +144,7 @@ public sealed class DeviceHost : IAsyncDisposable
             trace,
             Provider.GetRequiredService<Grounding>(),
             Provider.GetRequiredService<SafetyFilter>(),
+    Provider.GetRequiredService<RepeatReadFilter>(),
             Provider.GetRequiredService<ApprovalCoordinator>(),
             Provider.GetRequiredService<MonitorAdapt>(),
             Provider.GetRequiredService<CapabilityManager>(),
