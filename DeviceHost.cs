@@ -120,7 +120,7 @@ public sealed class DeviceHost : IAsyncDisposable
         // shell environment, so LlmRouting takes a reader rather than calling
         // Environment.GetEnvironmentVariable itself. Unset = LlmRouting.None = a request body
         // identical to v7. Pinning matters more here than anywhere: measured on Ubuntu, the same
-        // plan took 59-189s unpinned and 8-10s pinned to cerebras,groq.
+        // plan took 59-189s unpinned and 8-10s pinned to cerebras.
         settings = settings with
         {
             Routing = LlmRouting.FromEnvironment(
