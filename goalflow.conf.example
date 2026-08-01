@@ -15,12 +15,9 @@ OPENROUTER_API_KEY=sk-or-...
 
 # Optional — defaults shown.
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-#
-# THE `:nitro` SUFFIX IS NOT DECORATION — it is how this Hub gets a fast provider. See the
-# v8 block near the bottom of this file before you remove it. THIS IS THE ONLY PLACE
-# OPENROUTER_MODEL IS SET: keys are last-one-wins, so a second declaration further down
-# would silently beat whatever you edit here.
-OPENROUTER_MODEL=openai/gpt-oss-120b:nitro
+# THIS IS THE ONLY PLACE OPENROUTER_MODEL IS SET: keys are last-one-wins, so a second
+# declaration further down would silently beat whatever you edit here.
+OPENROUTER_MODEL=openai/gpt-oss-120b
 
 # Optional — per-call LLM deadlines (seconds). Raise these if a large/slow model or
 # provider load cancels planning mid-compose ("TaskCanceledException"); a healthy compose
@@ -58,32 +55,31 @@ WS_URL=ws://localhost:8000/ws
 
 # --- v8: MAKE THE HUB FAST. Read this before blaming the model. ---
 #
-# Measured on Ubuntu with the identical core: the same plan took 59s, 175s, 145s and 189s on
-# four runs, then 8.4s, 8.4s, 8.7s and 10.1s once a provider was chosen. Nothing about the
-# prompts changed. Unset, OpenRouter load-balances this model across nineteen endpoints whose
-# throughput spans 39x (CoreWeave 52 tok/s and Novita 76, against Cerebras 1523).
+# Measured on Ubuntu with the byte-identical core: the same plan took 59s, 175s, 145s and 189s
+# on four runs, then 8-10s once a provider was chosen. Nothing about the prompts changed.
+# Unset, OpenRouter load-balances this model across nineteen endpoints whose throughput spans
+# 39x (CoreWeave 52 tok/s and Novita 76, against Cerebras 1523).
 #
-# ON TIZEN, USE THE MODEL SLUG. The precise form — OPENROUTER_PROVIDER_ORDER below — needs
-# Semantic Kernel's ExtraBody, which arrived in SK 1.78; this project is pinned to SK 1.43 and
-# CANNOT move, because SK >= 1.61 depends on System.Text.Json 10.x and Tizen 12 ships its own
-# STJ 8.x as a platform assembly that wins the load. The `:nitro` suffix asks OpenRouter to
-# sort by throughput using nothing but the model id, so it needs no SK support at all.
-# Verified: `openai/gpt-oss-120b:nitro` is served by Cerebras, the same endpoint the explicit
-# order reaches on Ubuntu.
+# THE HUB SENDS THIS THE SAME WAY UBUNTU DOES. Both device repos are pinned to Semantic Kernel
+# 1.43 — the Hub cannot move (Tizen 12 ships its own System.Text.Json 8.x as a platform
+# assembly, and SK >= 1.61 wants 10.x), and Ubuntu matches it on purpose so the dev box
+# exercises the SK the Hub runs. SK 1.43 has no ExtraBody, so `provider` rides on the
+# HttpClient via OpenRouterBodyHandler, which needs no SK support at all.
 #
-# IT IS SET AT THE TOP OF THIS FILE, on the OPENROUTER_MODEL line — not here. Setting it twice
-# would mean the later line silently wins, and the one you edited did nothing.
-#
-# The trade you are making: `:nitro` re-sorts by throughput on every request, so it can pick a
-# different fast provider on a different day. Ubuntu's explicit order is reproducible. For a
-# rehearsed demo that difference is worth knowing about; for the Hub it is the only option.
+# CEREBRAS OR NOTHING, and allow_fallbacks=false is the point. Measured on the real pipeline,
+# Cerebras plans a goal in 8-10s and the next-best provider takes 203-234s — SLOWER than
+# sending no preference. A fallback here is not graceful degradation, it is a silent
+# four-minute stall; better to fail visibly and re-run.
+OPENROUTER_PROVIDER_ORDER=cerebras
+OPENROUTER_PROVIDER_ALLOW_FALLBACKS=false
 
-# The precise form, for the day the STJ pin can be lifted. Harmless to set now, but it does
-# NOTHING on SK 1.43 — and only then does the agent say so at startup
-# ("llm_routing ... !! this Semantic Kernel build has no ExtraBody"). Leave it commented and
-# the startup line reads `llm_routing off`, which is correct: nothing was asked for.
-# OPENROUTER_PROVIDER_ORDER=cerebras,groq
-# OPENROUTER_PROVIDER_ALLOW_FALLBACKS=true
+# Escape hatch for the whole provider object (wins over the two above):
+# OPENROUTER_PROVIDER_JSON={"order":["cerebras","groq"],"allow_fallbacks":true}
+#
+# `openai/gpt-oss-120b:nitro` on the OPENROUTER_MODEL line is an ALTERNATIVE, not a
+# requirement: it asks OpenRouter to sort by throughput using nothing but the model id.
+# Verified working, and it also lands on Cerebras — but it always allows fallbacks, which is
+# exactly what the measurement above says not to do. Keep it as a fallback plan, not the plan.
 
 # --- v8: reasoning_effort. BUILT, SUPPORTED HERE, AND DELIBERATELY LEFT OFF. ---
 #
