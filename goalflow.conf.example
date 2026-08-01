@@ -50,3 +50,32 @@ WS_URL=ws://localhost:8000/ws
 
 # Optional — log level (Trace|Debug|Information|Warning|Error). Default: Information.
 # LOG_LEVEL=Information
+
+# --- v8: MAKE THE HUB FAST. Read this before blaming the model. ---
+#
+# Measured on Ubuntu with the identical core: the same plan took 59s, 175s, 145s and 189s on
+# four runs, then 8.4s, 8.4s, 8.7s and 10.1s once a provider was chosen. Nothing about the
+# prompts changed. Unset, OpenRouter load-balances this model across nineteen endpoints whose
+# throughput spans 39x (CoreWeave 52 tok/s and Novita 76, against Cerebras 1523).
+#
+# ON TIZEN, USE THE MODEL SLUG. The precise form — OPENROUTER_PROVIDER_ORDER below — needs
+# Semantic Kernel's ExtraBody, which arrived in SK 1.78; this project is pinned to SK 1.43 and
+# CANNOT move, because SK >= 1.61 depends on System.Text.Json 10.x and Tizen 12 ships its own
+# STJ 8.x as a platform assembly that wins the load. The `:nitro` suffix asks OpenRouter to
+# sort by throughput using nothing but the model id, so it needs no SK support at all.
+OPENROUTER_MODEL=openai/gpt-oss-120b:nitro
+
+# The precise form. Harmless to set — it is simply not sent on this SK line, and the agent says
+# so at startup ("llm_routing ... !! this Semantic Kernel build has no ExtraBody"). It starts
+# working the day the STJ pin can be lifted.
+# OPENROUTER_PROVIDER_ORDER=cerebras,groq
+# OPENROUTER_PROVIDER_ALLOW_FALLBACKS=true
+
+# --- v8: reasoning_effort. BUILT, SUPPORTED HERE, AND DELIBERATELY LEFT OFF. ---
+#
+# DO NOT SET THIS TO "low" WITHOUT RE-MEASURING. Benchmarked on every provider: reasoning
+# tokens collapse from ~1400 to 26-89 and the model stops being able to do the job — every
+# single "low" run returned an INVALID plan. And there is nothing to win: "medium" and the
+# provider default are within 0.2s once the provider is fast. Values: minimal|low|medium|high|off.
+# LLM_REASONING_EFFORT=medium
+# LLM_REASONING_EFFORT_COMPOSE=off
