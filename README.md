@@ -100,6 +100,50 @@ The required package identity is in `tizen-manifest.xml`:
 The service dlog-logs breadcrumbs at launch / OnCreate / connecting, and any
 startup exception, so an empty log means it crashed before those ran.
 
+### Starting from a clean world
+
+On Ubuntu a demo starts with `rm -rf data-run1` — a fresh mock world every run.
+There is no equivalent folder to delete here, because the writable world lives in
+the app's **private data dir** (`Application.Current.DirectoryInfo.Data`), and a
+Tizen service has no console to delete it from.
+
+What makes a wipe work at all: `DeviceConfig.ResolveDataDir()` calls
+`SeedMissing(bundled, writable)`, which copies a bundled `data/*.json` **only when
+the file is absent**. Nothing ever overwrites a file that is still there — that is
+deliberate (a build that adds a world file must reach Hubs that have already run an
+older one) but it also means a dirty world survives forever unless you remove it.
+Deleting the JSON *is* the wipe; the next launch re-seeds.
+
+**Between runs — the direct equivalent of `rm -rf data-run1`:**
+
+```bash
+sdb shell "rm -f /home/owner/apps_rw/org.goalflow.deviceagent/data/*.json"
+sdb shell app_launcher -k org.goalflow.deviceagent    # then relaunch the service
+```
+
+Check the path on your image first (`sdb shell ls /home/owner/apps_rw/`) — it moves
+between Tizen versions and profiles.
+
+**Keep `device_id`.** It sits in the same directory and is the cloud's PAIRING KEY.
+The `*.json` glob spares it on purpose: delete it and the Hub comes back under a new
+identity, so every UI that remembered the old one shows it offline until re-picked.
+`rm -rf <data>/*` and a package reinstall both take it with them.
+
+**Wholesale:** `sdb uninstall org.goalflow.deviceagent` then `tizen install …` clears
+app data completely. Cleanest, depends on no path convention — and mints a new
+`device_id`, so expect to re-pair.
+
+**Mid-session, without a shell — `control: reset`.** The contract already carries it
+(`ControlCommands.Reset`): the device rewrites every seeded world file and drops every
+active goal. It is the only reset a Tizen service can perform on itself.
+
+> ⚠️ It restores the world to **whatever it was when the service started**, not to the
+> bundled seed. `MockFamilyHubAdapter` snapshots `_seed` from the *writable* dir in its
+> constructor. On Ubuntu the two are the same thing because you wipe before launching;
+> here they are the same thing only if the service was started clean. Note also that no
+> UI sends `reset` today — the board only sends `advance_day` — so it needs a frame sent
+> by hand.
+
 **Package versions are pinned to the .NET 8 line** (`SemanticKernel 1.43.0`,
 `System.Text.Json 8.0.5`, `Microsoft.Extensions.* 8.0.x`). Tizen 12 runs on
 .NET 8 and ships its own `System.Text.Json`; wildcard versions pulled .NET 10-era

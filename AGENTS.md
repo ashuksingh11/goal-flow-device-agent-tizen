@@ -2,7 +2,7 @@
 
 Context for an AI/coding session in this repo. Read first.
 
-## Status: v7 — in sync with ubuntu (re-synced 2026-07-30, v7-M0…M6)
+## Status: v8.1 — in sync with ubuntu (re-synced 2026-08-02)
 
 This is the **Tizen Family Hub** deployment of the GoalFlow device agent. It runs the
 v3 Semantic-Kernel design and is **in sync** with the source of truth,
@@ -28,6 +28,27 @@ Budget plugin report the goal's ARMED cap. **NO host wiring was needed** — the
 entirely inside the copied core plus `data/`. Three data files came with it:
 `budget.json` lost `cap` and `vacation.json` lost `away` (both are now dispatched policy),
 and `family.json` gained a warning that a `dietary` entry here enforces nothing.
+
+**v8.1 re-sync (2026-08-02) — core copy, NO host-side change.** Two files moved:
+`Agent/GoalAgent.cs` and `Contracts/ContractJson.cs`. Both are pure core, so nothing in
+`DeviceHost.cs`, `Program.cs` or `DeviceConfig.cs` needed touching, and `Harness/`,
+`Products/`, `Contracts/` and `data/` are byte-identical to ubuntu again.
+
+What came with it, and why each matters ON A DEVICE more than on a dev box:
+
+- **An actuator that throws no longer takes the goal down.** `_kernel.InvokeAsync` in the
+  approval loop was unguarded, and plugins throw deliberately (`DeliveriesPlugin.Hold`
+  refuses an essential delivery; `Find` throws for a delivery the household does not have).
+  One throw left the loop AND the handler: later proposals skipped, nothing marked
+  executed, no status frame sent. New `ExecutionResults.FailedActuator` reports it per
+  proposal and the loop carries on.
+- **…and the goal can still complete afterwards.** Tasks reach `Monitoring` on the last
+  line of `ApplyApprovalCoreAsync`, so a throw stranded them in `Executing` and
+  `CompleteIfWindowPassedAsync` — which only swept `Monitoring` — could never finish the
+  goal. Not late: never. It now sweeps `Executing` too. On Tizen there is no scratch dir to
+  delete, so a goal stuck like this would sit on the board until the package was
+  reinstalled.
+- **The task decomposition reports as steps** rather than one arrow-separated paragraph.
 
 **v7 re-sync (2026-07-30) — core copy + ONE host-side fix.** Everything v7 added lives in
 the copied core (`Harness/`, `Products/`, `Contracts/`, `Agent/`) plus two new world files,

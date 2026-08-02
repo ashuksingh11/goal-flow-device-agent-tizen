@@ -92,6 +92,7 @@ public sealed class DeviceHost : IAsyncDisposable
         services.AddSingleton<ApprovalCoordinator>();
         services.AddSingleton<Grounding>();
         services.AddSingleton<RepeatReadFilter>();
+        services.AddSingleton<ToolRoundFilter>();
         services.AddSingleton<MonitorAdapt>();
         services.AddSingleton<PrecheckEngine>();
 
@@ -114,6 +115,17 @@ public sealed class DeviceHost : IAsyncDisposable
         // demo audience can watch the pipeline light up. 0/unset = OFF (real timing). Allow 0.
         if (int.TryParse(config.Get("HARNESS_DWELL_MS"), out var harnessDwell) && harnessDwell >= 0)
             settings = settings with { HarnessDwellMs = harnessDwell };
+        // v8: OpenRouter provider routing + per-call-site reasoning_effort. Read through
+        // DeviceConfig, NOT the environment — a Tizen ServiceApplication is not launched with a
+        // shell environment, so LlmRouting takes a reader rather than calling
+        // Environment.GetEnvironmentVariable itself. Unset = LlmRouting.None = a request body
+        // identical to v7. Pinning matters more here than anywhere: measured on Ubuntu, the same
+        // plan took 59-189s unpinned and 8-10s pinned to cerebras.
+        settings = settings with
+        {
+            Routing = LlmRouting.FromEnvironment(
+                key => config.Get(key), loggerFactory.CreateLogger("llm-routing"))
+        };
         var kernel = GoalAgent.BuildKernel(settings, provider);
 
         return new DeviceHost(
@@ -145,6 +157,7 @@ public sealed class DeviceHost : IAsyncDisposable
             Provider.GetRequiredService<Grounding>(),
             Provider.GetRequiredService<SafetyFilter>(),
     Provider.GetRequiredService<RepeatReadFilter>(),
+    Provider.GetRequiredService<ToolRoundFilter>(),
             Provider.GetRequiredService<ApprovalCoordinator>(),
             Provider.GetRequiredService<MonitorAdapt>(),
             Provider.GetRequiredService<CapabilityManager>(),

@@ -15,6 +15,8 @@ OPENROUTER_API_KEY=sk-or-...
 
 # Optional — defaults shown.
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+# THIS IS THE ONLY PLACE OPENROUTER_MODEL IS SET: keys are last-one-wins, so a second
+# declaration further down would silently beat whatever you edit here.
 OPENROUTER_MODEL=openai/gpt-oss-120b
 
 # Optional — per-call LLM deadlines (seconds). Raise these if a large/slow model or
@@ -50,3 +52,40 @@ WS_URL=ws://localhost:8000/ws
 
 # Optional — log level (Trace|Debug|Information|Warning|Error). Default: Information.
 # LOG_LEVEL=Information
+
+# --- v8: MAKE THE HUB FAST. Read this before blaming the model. ---
+#
+# Measured on Ubuntu with the byte-identical core: the same plan took 59s, 175s, 145s and 189s
+# on four runs, then 8-10s once a provider was chosen. Nothing about the prompts changed.
+# Unset, OpenRouter load-balances this model across nineteen endpoints whose throughput spans
+# 39x (CoreWeave 52 tok/s and Novita 76, against Cerebras 1523).
+#
+# THE HUB SENDS THIS THE SAME WAY UBUNTU DOES. Both device repos are pinned to Semantic Kernel
+# 1.43 — the Hub cannot move (Tizen 12 ships its own System.Text.Json 8.x as a platform
+# assembly, and SK >= 1.61 wants 10.x), and Ubuntu matches it on purpose so the dev box
+# exercises the SK the Hub runs. SK 1.43 has no ExtraBody, so `provider` rides on the
+# HttpClient via OpenRouterBodyHandler, which needs no SK support at all.
+#
+# CEREBRAS OR NOTHING, and allow_fallbacks=false is the point. Measured on the real pipeline,
+# Cerebras plans a goal in 8-10s and the next-best provider takes 203-234s — SLOWER than
+# sending no preference. A fallback here is not graceful degradation, it is a silent
+# four-minute stall; better to fail visibly and re-run.
+OPENROUTER_PROVIDER_ORDER=cerebras
+OPENROUTER_PROVIDER_ALLOW_FALLBACKS=false
+
+# Escape hatch for the whole provider object (wins over the two above):
+# OPENROUTER_PROVIDER_JSON={"order":["cerebras","groq"],"allow_fallbacks":true}
+#
+# `openai/gpt-oss-120b:nitro` on the OPENROUTER_MODEL line is an ALTERNATIVE, not a
+# requirement: it asks OpenRouter to sort by throughput using nothing but the model id.
+# Verified working, and it also lands on Cerebras — but it always allows fallbacks, which is
+# exactly what the measurement above says not to do. Keep it as a fallback plan, not the plan.
+
+# --- v8: reasoning_effort. BUILT, SUPPORTED HERE, AND DELIBERATELY LEFT OFF. ---
+#
+# DO NOT SET THIS TO "low" WITHOUT RE-MEASURING. Benchmarked on every provider: reasoning
+# tokens collapse from ~1400 to 26-89 and the model stops being able to do the job — every
+# single "low" run returned an INVALID plan. And there is nothing to win: "medium" and the
+# provider default are within 0.2s once the provider is fast. Values: minimal|low|medium|high|off.
+# LLM_REASONING_EFFORT=medium
+# LLM_REASONING_EFFORT_COMPOSE=off
