@@ -129,7 +129,8 @@ check below release-critical for exactly the reason it was written.
 The port is deliberately thin: the **portable v3 core is byte-for-byte identical**
 to the Ubuntu build, and only the platform edges differ. Future re-syncs are a
 plain copy of the core + a `dotnet build` — NEVER overwrite the Tizen host files
-(`Program.cs`, `DeviceHost.cs`, `DeviceConfig.cs`, `DlogLogger.cs`, `AssemblyResolver.cs`).
+(`Program.cs`, `DeviceHost.cs`, `DeviceConfig.cs`, `DlogLogger.cs`, `AssemblyResolver.cs`,
+`DayAppControl.cs`).
 Verify a re-sync with:
 
 ```bash
@@ -147,9 +148,39 @@ plans with **zero safety enforcement**, silently. After a build, confirm:
 `find bin/Debug/net8.0/Products -name '*.json'` lists both files.
 
 **The device-side on-Hub UI was DROPPED in v3-M9.** The old `UiChannel.cs` (App Control
-launch + Message Port forwarding to `org.goalflow.tizenui`) and its `appmanager.launch`
-manifest privilege are gone; this host now does only the cloud path, exactly like Ubuntu.
-`../goal-flow-agent-tizen-ui` is not part of v3.
+launch + Message Port forwarding to `org.goalflow.tizenui`) is gone; this host does only
+the cloud path, exactly like Ubuntu. `../goal-flow-agent-tizen-ui` is not part of v3.
+
+## v10.0a — the day App Control (Tizen-only, and re-sync-proof by construction)
+
+An **`advance_day`** tick fires ONE App Control at another on-Hub app carrying a single
+string: `ExtraData["day"] == "day 1"` / `"day 2"` / `"day 3"`. The receiver does the rest;
+this side has no reply and no callback.
+
+**The whole feature is TWO host files, and that is the point.** A device-only side effect
+written into `Agent/` or `Contracts/` would be deleted by the next wholesale core copy —
+silently, and only noticed on a Hub. So:
+
+- **`DayAppControl.cs` (new host file)** — owns the `AppControl` + `SendLaunchRequest`, the
+  `"day N"` string, and a `try/catch` that dlogs every failure. A missing target app or a
+  revoked privilege must not be able to break the world tick the board is waiting on.
+- **`Program.cs`** — four lines in the existing world-tick branch, AFTER the cloud frames
+  are sent: `advance_day` → `Fire(world.DayAdvanced?.Day ?? 0)`, `reset` → `Reset()`.
+
+Consequences a future re-sync must keep true: `Agent/ Contracts/ Harness/ Products/
+Transport/` stay byte-identical (the `diff -rq` above still prints nothing), **Ubuntu needs
+no counterpart** because nothing shared changed, and both files are on the never-overwrite
+list above.
+
+- **Target app**: `DAY_APPCONTROL_APPID` in `goalflow.conf` (see `goalflow.conf.example`).
+  **Unset = off** — a Hub with no such app installed sends nothing instead of throwing once
+  a day. Retargeting is a conf edit on the Hub, not a rebuild. `OnCreate` dlogs which it is.
+- **Manifest**: `http://tizen.org/privilege/appmanager.launch` is back in
+  `tizen-manifest.xml` (the launch throws without it).
+- **The day number** is `DayAdvanced.Day` — the same 1-based day the Agent Board shows,
+  measured from the earliest ACTIVE goal's window start. It is **0 when no goal is running**,
+  so `DayAppControl` falls back to its own tick count, which a world `reset` puts back to
+  zero. Watch it with `dlogutil GOALFLOW | grep day_appcontrol`.
 
 **A core change may need host wiring on BOTH sides.** Example: `device_id` landed in the
 core (`Contracts/Hello.cs`, `Transport/WsClient.cs`) but each host resolves it its own
@@ -203,11 +234,14 @@ in `OnCreate` (dlog-logged) and passes them to `WsClient`.
     seeds a writable `data/` copy in the app Data dir.
   - `DlogLogger.cs` — `ILoggerProvider` routing `Microsoft.Extensions.Logging` → `Tizen.Log`
     (dlog). View logs on the Hub with `dlogutil GOALFLOW`.
+  - `DayAppControl.cs` — v10.0a. Fires the `"day N"` App Control at another on-Hub app on
+    every `advance_day`. Config-gated (`DAY_APPCONTROL_APPID`), never throws at the caller.
   - `GoalFlow.Device.Tizen.csproj` — net8.0 + Tizen.NET 12.x + Semantic Kernel +
     Microsoft.Extensions.{Logging,Console,DI}. Keep the package list in sync with the
     Ubuntu csproj. Bundles `data/**/*.json` + (if present) `goalflow.conf`.
-  - `tizen-manifest.xml` — `service-application` (headless), internet + alarm +
-    notification + mediastorage privileges (reserved for real actuators).
+  - `tizen-manifest.xml` — `service-application` (headless), internet + appmanager.launch
+    (v10.0a, the day App Control) + alarm + notification + mediastorage privileges (the
+    last three reserved for real actuators).
 
 ## Tizen platform notes (do NOT regress — these caused real on-Hub crashes)
 
