@@ -2,7 +2,7 @@
 
 Context for an AI/coding session in this repo. Read first.
 
-## Status: v8.1 — in sync with ubuntu (re-synced 2026-08-02)
+## Status: v9 — in sync with ubuntu (re-synced 2026-08-04)
 
 This is the **Tizen Family Hub** deployment of the GoalFlow device agent. It runs the
 v3 Semantic-Kernel design and is **in sync** with the source of truth,
@@ -28,6 +28,42 @@ Budget plugin report the goal's ARMED cap. **NO host wiring was needed** — the
 entirely inside the copied core plus `data/`. Three data files came with it:
 `budget.json` lost `cap` and `vacation.json` lost `away` (both are now dispatched policy),
 and `family.json` gained a warning that a `dietary` entry here enforces nothing.
+
+**v9 re-sync (2026-08-04) — core copy, NO host-side change.** Four core files moved
+(`Agent/GoalAgent.cs`, `Harness/SafetyPolicyEngine/SafetyFilter.cs`,
+`Products/FamilyHub/Observers/MealPlanObserver.cs`,
+`Products/FamilyHub/Plugins/RecipePlugin.cs`) plus `data/daily_events.json` and its
+`data/README.md`, which had drifted two syncs back and still named `MockWorldStore`.
+`Agent/ Contracts/ Harness/ Products/ Transport/` are byte-identical to ubuntu again.
+
+What came with it, and what it means on a device:
+
+- **A 429 is not a dropped socket.** Every retry site waited `400ms x attempt`, which is
+  right for a stream that hiccupped and two orders short for a quota window measured in
+  seconds — three grounding attempts were being spent inside ~1.2s, all doomed. Rate limits
+  now back off 2s, 4s… (capped 20s, jittered), `Retry-After` wins when the provider states
+  one, everything else keeps its 400ms, and one **process-wide cool-off** is waited out
+  before every LLM call so a throttled run slows down once instead of at each site. This
+  matters more here than on the dev box: the Hub has no console to read the failure off,
+  and a plan that dies to a rate limit just sits there.
+- **Task Manager beats where the tasks are DECIDED** (around `DecomposeAsync`), not sixty
+  lines later where the ledger is written. That also gives the decomposition steps an
+  author — they were being filed under Grounding, an engine that had not started.
+- **The transcript stops reading a prompt back at the user.** A grounding step's headline
+  was the whole `[Description]`, which is written for the model; `SafetyFilter.Describe`
+  takes the first clause now.
+- **`steer` is for the model, `action` is for the family.** `MealPlanObserver` set both
+  from `steer`, so the adaptation card asked a family to "say both reasons in the why".
+  `data/daily_events.json` carries an `action` per event — **it is a new field in a shipped
+  data file, so it rides the csproj `data/**/*.json` glob; check it is in the .tpk.**
+- **Two prompt fixes**: the compose schema's `rejected` example (`pork belly stir-fry / no
+  pork`) was being copied verbatim into home-prep plans, and an adapted row must stay the
+  same KIND of thing it was rather than restating the instruction it was given.
+
+**No host wiring was needed, and one thing deliberately did NOT come across:** ubuntu's
+`Program.cs` gained gate 30 (`--verify-backoff`). Gates live in ubuntu's host and a Tizen
+service takes no CLI arguments, so there is no equivalent here — run the gate chain on
+ubuntu, which is where the shared core is verified.
 
 **v8.1 re-sync (2026-08-02) — core copy, NO host-side change.** Two files moved:
 `Agent/GoalAgent.cs` and `Contracts/ContractJson.cs`. Both are pure core, so nothing in
