@@ -20,6 +20,12 @@ namespace GoalFlow.Device;
 /// v3-M9: the device-side on-Hub UI was dropped, so the App-Control launch + Message
 /// Port forwarding (the old <c>UiChannel</c>) is gone — this host now does only the
 /// cloud path, exactly like Ubuntu.
+///
+/// v10.0a: one device-only side effect came back — an "advance day" tick fires a
+/// day App Control at another on-Hub app (<see cref="DayAppControl"/>). It is wired
+/// here, in the host, for the reason written on that class: the core is re-copied
+/// wholesale from Ubuntu on every re-sync, so anything device-specific must live in a
+/// file the sync never overwrites.
 /// </summary>
 public sealed class GoalFlowService : ServiceApplication
 {
@@ -28,6 +34,7 @@ public sealed class GoalFlowService : ServiceApplication
     private Task? _connectLoop;
     private string _deviceId = "";
     private string _deviceName = "";
+    private DayAppControl? _dayAppControl;
 
     protected override void OnCreate()
     {
@@ -51,6 +58,14 @@ public sealed class GoalFlowService : ServiceApplication
             _deviceId = config.ResolveDeviceId(dataDir);
             _deviceName = config.ResolveDeviceName(_deviceId);
             Tizen.Log.Info(DlogLoggerProvider.Tag, $"OnCreate: device_id={_deviceId} device_name={_deviceName}");
+
+            // v10.0a: the day App Control target, if this Hub has one configured. Logged at
+            // startup because the alternative — silence — is indistinguishable from a
+            // receiver that never launched.
+            _dayAppControl = new DayAppControl(config);
+            Tizen.Log.Info(DlogLoggerProvider.Tag, _dayAppControl.Enabled
+                ? "OnCreate: day app-control ENABLED"
+                : $"OnCreate: day app-control off (set {DayAppControl.AppIdKey} in goalflow.conf to enable)");
 
             var wsUrl = config.Get("WS_URL", "ws://localhost:8000/ws");
             Tizen.Log.Info(DlogLoggerProvider.Tag, $"OnCreate: host built, connecting to {wsUrl}");
@@ -113,6 +128,18 @@ public sealed class GoalFlowService : ServiceApplication
                                     foreach (var s in world.Statuses) await ws.SendAsync(s, ct);
                                     foreach (var p in world.Proposals) await ws.SendAsync(p, ct);
                                     if (world.DayAdvanced is not null) await ws.SendAsync(world.DayAdvanced, ct);
+
+                                    // v10.0a — TIZEN ONLY: hand the new day to another on-Hub app.
+                                    // After the cloud frames, never before: the board is the thing
+                                    // waiting on this tick, and a slow App Control must not delay it.
+                                    if (control.Command == ControlCommands.AdvanceDay)
+                                    {
+                                        _dayAppControl?.Fire(world.DayAdvanced?.Day ?? 0);
+                                    }
+                                    else if (control.Command == ControlCommands.Reset)
+                                    {
+                                        _dayAppControl?.Reset();
+                                    }
                                 }
                                 else
                                 {

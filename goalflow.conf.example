@@ -46,6 +46,13 @@ WS_URL=ws://localhost:8000/ws
 # Optional — start the simulated clock at a fixed date (ISO). Default: real today.
 # GOALFLOW_DATE=2026-07-14
 
+# Optional (v10.0a) — tell another on-Hub app that the day moved. When set, each
+# "advance day" fires ONE App Control at this application id carrying a single string
+# extra: key "day", value "day 1" / "day 2" / "day 3". The app is launched if it is not
+# already running (needs the appmanager.launch privilege, already in tizen-manifest.xml).
+# UNSET = off, and nothing is sent. Failures are logged to dlog and never affect the tick.
+# DAY_APPCONTROL_APPID=org.example.dayviewer
+
 # Optional — override the mock-world data directory. Default: a writable copy
 # seeded into the app Data dir from the bundled resource data.
 # GOALFLOW_DATA_DIR=/opt/usr/home/owner/apps_rw/org.goalflow.deviceagent/data
