@@ -2,7 +2,7 @@
 
 Context for an AI/coding session in this repo. Read first.
 
-## Status: v9 — in sync with ubuntu (re-synced 2026-08-04)
+## Status: v11 — in sync with ubuntu (re-synced 2026-08-07)
 
 This is the **Tizen Family Hub** deployment of the GoalFlow device agent. It runs the
 v3 Semantic-Kernel design and is **in sync** with the source of truth,
@@ -28,6 +28,39 @@ Budget plugin report the goal's ARMED cap. **NO host wiring was needed** — the
 entirely inside the copied core plus `data/`. Three data files came with it:
 `budget.json` lost `cap` and `vacation.json` lost `away` (both are now dispatched policy),
 and `family.json` gained a warning that a `dietary` entry here enforces nothing.
+
+**v11 re-sync (2026-08-07) — core copy, NO host-side change.** TWO files moved
+(`Agent/GoalAgent.cs`, `Contracts/PlanReady.cs`); `Agent/ Contracts/ Harness/ Products/
+Transport/` are byte-identical to ubuntu again and `data/` was already in sync. No DI
+change: everything new is either a static method or a contract record constructed inline,
+and the safety filter is still attached inside the shared `GoalAgent.BuildKernel` rather
+than by either host. Verified after the copy: build clean (the one CS8602 is pre-existing
+and also present on ubuntu), `Products/FamilyHub/config/{policy,prechecks}.json` and
+`data/*.json` both reach `bin/`, and the two hosts' service registrations match.
+
+What came with it, and **the first item is why this sync mattered**:
+
+- **A DISPATCH IS ALWAYS ANSWERED, and the hang it fixes was worse here.** Any exception
+  during planning used to escape `RunAsync` into this repo's `Program.cs` frame handler,
+  which did `catch { log.LogError(...) }` and told nobody — so the cloud waited forever for
+  a `plan_ready`, the webview sat on "grounding", and the create bracket never closed.
+  Nothing in that chain has a timeout. On Ubuntu the error at least reached a console; HERE
+  the only trace was dlog, which nobody is watching mid-demo. `RunAsync` now catches and
+  answers with a precheck HOLD, which the cloud turns into a readable notice and a timed
+  close. The host needed no change: it already does `agent.RunAsync(...)` then
+  `ws.SendAsync(planReady)`, so it now sends the hold on the same line.
+- **A 429 is not a modelling failure.** Rate limits get their own retry counter (6, against
+  a measured ~3s provider recovery) and no longer consume one of the three compose attempts
+  — nor append a "your JSON was unparseable" instruction, which grew the prompt against a
+  TOKENS-per-window limit.
+- **A goal ends when its window AND its plan have both passed.** `Day` is a planner-chosen
+  index, so trusting it alone left board cards past their dates, and trusting the window
+  alone retired a 7-day meal plan on a 4-day window. `ResolveLastDay` takes the later.
+  Gate 34 exercises that method, which is now byte-identical here — the LOGIC is covered,
+  the Tizen host is not.
+- **The plan narrates itself.** `plan_ready.payload.narration` — two spoken sentences the
+  compose call writes alongside the plan, for the cloud's v11 text-to-speech. Optional; a
+  model that omits it costs the voice a sentence, never a plan.
 
 **v9 re-sync (2026-08-04) — core copy, NO host-side change.** Four core files moved
 (`Agent/GoalAgent.cs`, `Harness/SafetyPolicyEngine/SafetyFilter.cs`,
