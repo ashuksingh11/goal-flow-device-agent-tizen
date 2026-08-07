@@ -29,7 +29,7 @@ entirely inside the copied core plus `data/`. Three data files came with it:
 `budget.json` lost `cap` and `vacation.json` lost `away` (both are now dispatched policy),
 and `family.json` gained a warning that a `dietary` entry here enforces nothing.
 
-**v11 re-sync (2026-08-07) — core copy, NO host-side change.** TWO files moved
+**v11 re-sync (2026-08-07, refreshed same day for v11.3) — core copy, NO host-side change.** TWO files moved
 (`Agent/GoalAgent.cs`, `Contracts/PlanReady.cs`); `Agent/ Contracts/ Harness/ Products/
 Transport/` are byte-identical to ubuntu again and `data/` was already in sync. No DI
 change: everything new is either a static method or a contract record constructed inline,
