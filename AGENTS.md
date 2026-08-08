@@ -2,7 +2,7 @@
 
 Context for an AI/coding session in this repo. Read first.
 
-## Status: v11 — in sync with ubuntu (re-synced 2026-08-07)
+## Status: v12.2 — in sync with ubuntu (re-synced 2026-08-08)
 
 This is the **Tizen Family Hub** deployment of the GoalFlow device agent. It runs the
 v3 Semantic-Kernel design and is **in sync** with the source of truth,
@@ -28,6 +28,28 @@ Budget plugin report the goal's ARMED cap. **NO host wiring was needed** — the
 entirely inside the copied core plus `data/`. Three data files came with it:
 `budget.json` lost `cap` and `vacation.json` lost `away` (both are now dispatched policy),
 and `family.json` gained a warning that a `dietary` entry here enforces nothing.
+
+**v12.2 re-sync (2026-08-08) — core copy, NO host-side change.** ONE core file moved
+(`Products/FamilyHub/Plugins/RecipePlugin.cs`) plus ONE data file (`data/recipes.json`).
+`Agent/ Contracts/ Harness/ Products/ Transport/` are byte-identical to ubuntu again, and
+the rest of `data/` was already in sync (`data/README.md` checked, unchanged).
+
+What it carries: **`requires_fresh`**. `FindRecipes` now withholds a recipe whose
+`requires_fresh` ingredient is not in the fridge, and reports the count and the reason
+without naming the recipe. Exactly ONE recipe has the field — `rcp-007`, the only fish
+dish. Fish arrives on day 2 and the event asks the planner to swap that evening's dinner
+to use it; if the FIRST plan already chose the fish dish, that swap proposes the dinner
+already on the plan, and the adaptation does nothing in front of the audience. A pre-demo
+run on the Hub hit exactly that. **This is not a general stock filter and must not become
+one** — the fridge holds no beef, lamb or turkey either, and the planner is supposed to
+put missing items on the shopping list.
+
+No host wiring: the change is entirely inside one core plugin, and it reads the inventory
+through the `IProductApiAdapter` this host already provides. Ubuntu's gate 28
+(`--verify-repeat-reads`, half one-b) covers it; gates live in ubuntu's host, so the
+shared core is verified there. Packaging re-checked after the build: `policy.json` and
+`prechecks.json` are both in `bin/Debug/net8.0/Products/`, 22 data files shipped, and the
+packaged `recipes.json` carries `requires_fresh`.
 
 **v11 re-sync (2026-08-07, refreshed same day for v11.3) — core copy, NO host-side change.** TWO files moved
 (`Agent/GoalAgent.cs`, `Contracts/PlanReady.cs`); `Agent/ Contracts/ Harness/ Products/
